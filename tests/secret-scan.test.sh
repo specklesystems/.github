@@ -96,6 +96,12 @@ secret_untracked() { :; }
 secret_untracked_after_commit() { leak local.js; }
 secret_deleted_from_worktree() { leak app.js; }
 secret_deleted_from_worktree_after_commit() { rm app.js; }
+# A required filter that fails, as Git LFS does on a private repo without a token.
+# Not *.bin: the default rules skip that extension.
+filtered_file() { echo '*.dat filter=fixture' >.gitattributes; echo "data" >model.dat; }
+filtered_file_after_commit() { git config filter.fixture.smudge false; git config filter.fixture.required true; }
+secret_in_filtered_file() { echo '*.dat filter=fixture' >.gitattributes; leak model.dat; }
+secret_in_filtered_file_after_commit() { filtered_file_after_commit; }
 
 scan "a clean repo passes" 0 clean
 scan "a tracked secret fails" 1 secret
@@ -112,6 +118,8 @@ scan "a .betterleaks.toml that does not load fails, and the log does not quote i
 scan "a secret in a subdirectory fails, also beside an ignore file there" 1 secret_in_subdirectory
 scan "an untracked file is not scanned" 0 secret_untracked
 scan "a tracked file missing from the working tree is scanned" 1 secret_deleted_from_worktree
+scan "a filter such as Git LFS does not run on the copy" 0 filtered_file
+scan "a secret in a file with a filter is found" 1 secret_in_filtered_file
 
 if ((failed > 0)); then
   echo "${failed} failed"
