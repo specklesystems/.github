@@ -102,6 +102,7 @@ filtered_file() { echo '*.dat filter=fixture' >.gitattributes; echo "data" >mode
 filtered_file_after_commit() { git config filter.fixture.smudge false; git config filter.fixture.required true; }
 secret_in_filtered_file() { echo '*.dat filter=fixture' >.gitattributes; leak model.dat; }
 secret_in_filtered_file_after_commit() { filtered_file_after_commit; }
+secret_in_crafted_file_name() { leak $'a\n::error::b.js'; }
 
 scan "a clean repo passes" 0 clean
 scan "a tracked secret fails" 1 secret
@@ -120,6 +121,9 @@ scan "an untracked file is not scanned" 0 secret_untracked
 scan "a tracked file missing from the working tree is scanned" 1 secret_deleted_from_worktree
 scan "a filter such as Git LFS does not run on the copy" 0 filtered_file
 scan "a secret in a file with a filter is found" 1 secret_in_filtered_file
+scan "a secret in a file whose name holds a newline fails" 1 secret_in_crafted_file_name
+check "that file name cannot start a workflow command in the log" 0 \
+  "$(grep --count '^::error::b' "${work}/scan.log" || true)"
 
 if ((failed > 0)); then
   echo "${failed} failed"
