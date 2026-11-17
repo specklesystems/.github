@@ -90,6 +90,7 @@ betterleaksignore() { : >.betterleaksignore; }
 secret_with_rule() { leak app.js; except_app_js .betterleaks.toml; }
 secret_with_gitleaks_toml() { leak app.js; except_app_js .gitleaks.toml; }
 secret_in_config() { except_app_js .betterleaks.toml; printf '# token = "%s"\n' "${token}" >>.betterleaks.toml; }
+invalid_config() { printf "[[allowlists]]\ndescription = \"test fixture\"\nregexes = ['''%s(''']\n" "${token}" >.betterleaks.toml; }
 secret_in_subdirectory() { mkdir -p a/b; leak a/b/c.yaml; : >a/.gitleaksignore; }
 secret_untracked() { :; }
 secret_untracked_after_commit() { leak local.js; }
@@ -107,6 +108,7 @@ scan "a root .betterleaksignore fails" 1 betterleaksignore
 scan "a rule in .betterleaks.toml excepts a secret" 0 secret_with_rule
 scan "the same rule in .gitleaks.toml does not" 1 secret_with_gitleaks_toml
 scan "a secret inside .betterleaks.toml fails" 1 secret_in_config
+scan "a .betterleaks.toml that does not load fails, and the log does not quote it" 1 invalid_config
 scan "a secret in a subdirectory fails, also beside an ignore file there" 1 secret_in_subdirectory
 scan "an untracked file is not scanned" 0 secret_untracked
 scan "a tracked file missing from the working tree is scanned" 1 secret_deleted_from_worktree
