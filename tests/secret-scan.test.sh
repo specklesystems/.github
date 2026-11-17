@@ -6,7 +6,7 @@ set -euo pipefail
 # called workflow cannot read other files of this repo, so the test reads the
 # blocks out of the YAML instead of sourcing a script.
 #
-# Needs: git, curl, yq. Run from anywhere: tests/secret-scan.test.sh
+# Needs: git, curl, jq, yq. Run from anywhere: tests/secret-scan.test.sh
 
 workflow="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/workflows/secret-scan.yml"
 work="$(mktemp -d)"
@@ -35,7 +35,6 @@ check() { # description, expected, actual
   fi
 }
 
-# A wrong checksum must stop the install before anything is unpacked.
 status=0
 RUNNER_TEMP="$(mktemp -d -p "${work}")" BETTERLEAKS_SHA256="${BETTERLEAKS_SHA256//[0-9]/0}" \
   as_runner "${work}/install.sh" >"${work}/install-bad.log" 2>&1 || status=$?
@@ -45,8 +44,11 @@ as_runner "${work}/install.sh" >"${work}/install.log" 2>&1 || { cat "${work}/ins
 check "install unpacks the pinned version" "${BETTERLEAKS_VERSION}" "$("${RUNNER_TEMP}/betterleaks/betterleaks" version)"
 
 # Made at run time so that this repo never holds a string a scanner would flag.
-token="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36 || true)"
-leak() { printf 'token = "%s"%s\n' "${token}" "${2:-}" >"$1"; }
+# Two on one line: redacting one finding must not show the other.
+random_token() { echo "ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36 || true)"; }
+token="$(random_token)"
+other_token="$(random_token)"
+leak() { printf 'token = "%s"; other = "%s"%s\n' "${token}" "${other_token}" "${2:-}" >"$1"; }
 except_app_js() {
   cat >"$1" <<'TOML'
 [extend]
@@ -73,7 +75,7 @@ scan() { # description, expected exit status, function that fills the repo
   )
   (cd "${repo}" && as_runner "${work}/scan.sh" >"${work}/scan.log" 2>&1) || status=$?
   check "$1" "$2" "${status}"
-  if grep --quiet --fixed-strings "${token}" "${work}/scan.log"; then
+  if grep --quiet --fixed-strings --regexp "${token}" --regexp "${other_token}" "${work}/scan.log"; then
     echo "FAIL  $1: the log shows the secret"
     failed=$((failed + 1))
   fi
@@ -81,7 +83,8 @@ scan() { # description, expected exit status, function that fills the repo
 
 clean() { :; }
 secret() { leak app.js; }
-secret_with_allow_comments() { leak app.js ' # betterleaks:allow'; leak app.py ' # gitleaks:allow'; }
+secret_with_betterleaks_allow() { leak app.js ' # betterleaks:allow'; }
+secret_with_gitleaks_allow() { leak app.js ' # gitleaks:allow'; }
 gitleaksignore() { : >.gitleaksignore; }
 betterleaksignore() { : >.betterleaksignore; }
 secret_with_rule() { leak app.js; except_app_js .betterleaks.toml; }
@@ -95,7 +98,10 @@ secret_deleted_from_worktree_after_commit() { rm app.js; }
 
 scan "a clean repo passes" 0 clean
 scan "a tracked secret fails" 1 secret
-scan "an inline allow comment does not except a secret" 1 secret_with_allow_comments
+check "the log names the rule, file and line of both findings" 2 \
+  "$(grep --count --fixed-strings '"github-pat" in "app.js", line 1' "${work}/scan.log" || true)"
+scan "a betterleaks:allow comment does not except a secret" 1 secret_with_betterleaks_allow
+scan "a gitleaks:allow comment does not except a secret" 1 secret_with_gitleaks_allow
 scan "a root .gitleaksignore fails" 1 gitleaksignore
 scan "a root .betterleaksignore fails" 1 betterleaksignore
 scan "a rule in .betterleaks.toml excepts a secret" 0 secret_with_rule
