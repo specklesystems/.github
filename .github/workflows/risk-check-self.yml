@@ -1,0 +1,33 @@
+name: Risk check
+
+# Both triggers run this file from the default branch, with a token that can write
+# the status for a PR from a fork too. A review event cannot do this for a fork, so
+# the Risk check review workflow starts this one through workflow_run.
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
+    types:
+      [
+        opened,
+        edited,
+        synchronize,
+        reopened,
+        ready_for_review,
+        labeled,
+        unlabeled,
+        closed
+      ]
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: [Risk check review]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  check:
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    uses: $/.github/workflows/risk-check.yml
+    with:
+      runner: ubuntu-24.04

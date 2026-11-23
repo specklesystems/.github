@@ -1,0 +1,89 @@
+name: Risk check (reusable)
+
+# A repo calls this at a pinned commit from a workflow named `Risk check`, as
+# risk-check-self.yml does here. GitHub takes a workflow file for
+# pull_request_target and workflow_run from the default branch of the repo that
+# holds the pull request, so the triggers stay in that repo. The job never checks
+# out or runs code from the pull request.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: The runs-on label of the calling repo.
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+
+jobs:
+  # The ruleset requires the commit status named risk-check, which this job writes.
+  # The job keeps another name, so its own check run never satisfies it.
+  # A PR into any other branch is a stacked PR that the ruleset does not gate. A
+  # workflow_run event does not name the base branch, so the script skips those.
+  evaluate:
+    name: Evaluate
+    if: >-
+      github.event_name == 'workflow_run' ||
+      github.event.pull_request.base.ref == github.event.repository.default_branch ||
+      github.event.pull_request.base.ref == 'main' ||
+      github.event.pull_request.base.ref == 'dev' ||
+      startsWith(github.event.pull_request.base.ref, 'hotfix-')
+    runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: >-
+        risk-check-${{ github.event.pull_request.head.label ||
+        format('{0}:{1}', github.event.workflow_run.head_repository.owner.login,
+        github.event.workflow_run.head_branch) }}
+      cancel-in-progress: false # each run reads the PR afresh; a queued run must still write its status
+    permissions:
+      contents: read # the floors file from the default branch
+      pull-requests: write # the risk labels and the floor comments
+      statuses: write # the risk-check commit status
+    steps:
+      # First, so a removed emergency label takes its pass away at once.
+      - name: Mark risk-check pending
+        if: github.event.pull_request.state == 'open'
+        run: |
+          curl -fsS -o /dev/null -X POST \
+            -H "authorization: Bearer $GITHUB_TOKEN" \
+            -H 'accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -d '{"context":"risk-check","state":"pending","description":"Evaluating"}'
+      # The action of this repo at the commit of this file: the caller's pin.
+      - uses: $/risk-check
+        with:
+          github-token: ${{ github.token }}
+      # A run that fails must not leave an earlier pass mergeable. With the emergency
+      # label on a PR from the calling repo, a failed run passes instead: that is how
+      # the PR that repairs a broken risk check merges. The step reads the open PRs
+      # with this head from the API and not from the event: a re-run carries the event
+      # of its first attempt, with labels since removed, and a review event names no
+      # PR. If the lookup fails, it writes the error.
+      - name: Record a failed run
+        if: failure() && github.event.pull_request.state != 'closed'
+        env:
+          HEAD_LABEL: >-
+            ${{ github.event.pull_request.head.label ||
+            format('{0}:{1}', github.event.workflow_run.head_repository.owner.login,
+            github.event.workflow_run.head_branch) }}
+        run: |
+          EMERGENCY=$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f state=open -f per_page=100 -f head="$HEAD_LABEL" \
+            --jq '[.[] | select(.head.sha == env.HEAD_SHA)] | length > 0 and all(.[]; .head.repo.full_name == env.GITHUB_REPOSITORY and any(.labels[]; .name == "emergency"))') || EMERGENCY=false
+          if [ "$EMERGENCY" = true ]; then
+            state=success
+            description='emergency label: the risk check failed to run; review after the merge'
+          else
+            state=error
+            description='The risk check failed; see its run log'
+          fi
+          curl -fsS -o /dev/null -X POST \
+            -H "authorization: Bearer $GITHUB_TOKEN" \
+            -H 'accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -d "{\"context\":\"risk-check\",\"state\":\"$state\",\"description\":\"$description\"}"
