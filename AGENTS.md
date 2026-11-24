@@ -23,7 +23,7 @@ by searching the org's workflows for `specklesystems/.github/`.
 2. Dependabot in each caller (`.github/dependabot.yml`, ecosystem
    `github-actions`, group `dot-github`) opens the pin update with the
    compare view: `speckle-next` on its next daily run, every other caller
-   after a 3-day cooldown. Do not open pin updates by hand, unless a fix
+   after a 7-day cooldown. Do not open pin updates by hand, unless a fix
    cannot wait for them. Rules: ADR-0002 in the atlas,
    `atlas/specs/2026-11-change-gate-rollout/adr/0002-shared-risk-check-lives-in-dot-github.md`.
 3. A new caller adds that `dependabot.yml` entry when it first pins this
