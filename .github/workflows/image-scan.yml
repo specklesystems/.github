@@ -115,7 +115,10 @@ jobs:
           for image in ${INPUTS_IMAGES}; do
             reference="${INPUTS_IMAGE_PREFIX}/${image}:${INPUTS_IMAGE_VERSION_TAG}"
             report="reports/${image}.json"
+            # No usage data to Aqua and no update check from private repos'
+            # CI: neither is on our data processors list (ENG-11742).
             if "${RUNNER_TEMP}/trivy/trivy" image --image-src remote --scanners vuln \
+              --disable-telemetry --skip-version-check \
               "${ignore[@]}" --format json --output "${report}" "${reference}"; then
               jq -r --arg image "${image}" '
                 ([.Results[]?.Vulnerabilities[]?] | unique_by(.VulnerabilityID)) as $found
