@@ -224,6 +224,65 @@ describe('a repo floors file', () => {
   }
 })
 
+describe('a PR that changes the floors file', () => {
+  const unreadable = { text: 'yellow:\n  src/**\n' }
+  const approved = {
+    files: files('.github/risk-floors.yml'),
+    reviews: [colorReview('red'), approval('bob')]
+  }
+
+  it('fails while the file at its head has a line the check cannot read', () => {
+    const result = run({ ...approved, headFloors: unreadable })
+    assert.equal(result.state, 'failure')
+    assert.equal(
+      result.description,
+      'This PR breaks the floors file: .github/risk-floors.yml line 2: ' +
+        'expected one of "yellow:", "red:", "bots:" or "  - <value>"'
+    )
+    assert.equal(result.color, 'red')
+  })
+
+  it('fails while the file at its head has a path the check cannot match', () => {
+    const result = run({
+      ...approved,
+      headFloors: { text: 'red:\n  - src/a**b\n' }
+    })
+    assert.equal(result.state, 'failure')
+    assert.match(result.description, /whole path segment: src\/a\*\*b/)
+  })
+
+  it('does not pass on the emergency label', () => {
+    const result = run({
+      pr: pr({ labels: ['emergency'] }),
+      files: files('.github/risk-floors.yml'),
+      reviews: [colorReview('red')],
+      headFloors: unreadable
+    })
+    assert.equal(result.state, 'failure')
+    assert.equal(result.emergency, false)
+  })
+
+  it('passes on its approval when the file at its head reads', () => {
+    const result = run({ ...approved, headFloors: { text: 'red:\n  - src/**\n' } })
+    assert.equal(result.state, 'success')
+  })
+
+  it('fails when the check got no file at its head, also with the emergency label', () => {
+    const result = run({
+      pr: pr({ labels: ['emergency'] }),
+      files: files('.github/risk-floors.yml'),
+      reviews: [colorReview('red')],
+      headFloors: { unread: 'HTTP 502' }
+    })
+    assert.equal(result.state, 'failure')
+    assert.equal(result.emergency, false)
+    assert.equal(
+      result.description,
+      'The check could not read the floors file of this PR (HTTP 502); run it again'
+    )
+  })
+})
+
 describe('the floors file format', () => {
   it('rejects a list item without a dash', () => {
     assert.throws(() => parseConfig('yellow:\n  migrations/**\n'), /line 2/)
