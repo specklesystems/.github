@@ -163,6 +163,11 @@ const settleMerged = async ({ action, number, labels, result }) => {
   }
 }
 
+const loadHeadFloors = async ({ files, headSha }) =>
+  files.some(({ filename, status }) => filename === FLOORS_FILE && status !== 'removed')
+    ? api({ path: `/contents/${FLOORS_FILE}?ref=${headSha}`, raw: true })
+    : null
+
 const evaluate = async ({ action, pull }) => {
   const number = pull.number
   const baseRef = pull.base.ref
@@ -210,6 +215,7 @@ const evaluate = async ({ action, pull }) => {
       logins: [pr.authorLogin, ...reviewList.map(({ login }) => login)]
     }),
     config,
+    headFloors: await loadHeadFloors({ files, headSha: pull.head.sha }),
     picks
   })
   console.log(JSON.stringify({ number, headSha: pr.headSha, ...result }, null, 2))

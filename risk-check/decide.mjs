@@ -148,7 +148,7 @@ const redStatus = ({ pr, approvers, needed }) => {
 
 // `approved` says whether engineers other than the author approved the head, whatever
 // the color, so a later color review cannot settle a review owed after an emergency.
-export const decide = ({ pr, files, reviews, writers, config, picks = [] }) => {
+const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) => {
   const isEngineer = (login) =>
     writers.has(login) && !login.endsWith('[bot]') && !config.bots.includes(login)
   const needed = pr.authorIsBot || !isEngineer(pr.authorLogin) ? 2 : 1
@@ -225,4 +225,24 @@ export const decide = ({ pr, files, reviews, writers, config, picks = [] }) => {
       ? `${color}${raised}${next}`
       : `no color: PR from a fork, approved by ${approvers.join(', ')}`
   })
+}
+
+// The check reads the floors file from the default branch. A file it cannot read
+// there fails every later PR, so the PR that would merge one fails instead, and the
+// emergency label does not pass it. `headFloors` is the file at the PR's head when
+// the PR changes it.
+export const decide = ({ headFloors = null, ...input }) => {
+  const result = decideFromReviews(input)
+  if (headFloors === null) return result
+  try {
+    parseConfig(headFloors)
+    return result
+  } catch (error) {
+    return {
+      ...result,
+      state: 'failure',
+      emergency: false,
+      description: `This PR breaks the floors file: ${error.message}`
+    }
+  }
 }
