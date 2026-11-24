@@ -20,7 +20,7 @@ Callers pin a commit of this repo
 by searching the org's workflows for `specklesystems/.github/`.
 
 1. A merge to `main` that changes what callers run gets `main` tagged
-   with the next `v1.<n>.0` (`tag-release.yml`, which lists the paths
+   with the next `1.<n>.0` (`tag-release.yml`, which lists the paths
    that do not count). A new path that no caller runs goes on that list.
 2. Dependabot in each caller (`.github/dependabot.yml`, ecosystem
    `github-actions`, group `dot-github`) opens the pin update with the

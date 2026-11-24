@@ -1,7 +1,7 @@
 name: tag-release
 
 # A merge that changes what callers run tags the head of main with the next
-# v1.<n>.0. Callers pin a commit, and Dependabot updates a pin only when this
+# 1.<n>.0. Callers pin a commit, and Dependabot updates a pin only when this
 # repo has version tags, so the tag is what starts the pin update in each
 # caller (ADR-0002 amendment of 2026-11-24, ENG-11742). Paths no caller runs
 # are left out, so they open no pin update in every caller.
@@ -49,23 +49,23 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           head=$(gh api "repos/${REPO}/commits/main" --jq .sha)
-          refs=$(gh api --paginate "repos/${REPO}/git/matching-refs/tags/v1." --jq '.[]' | jq -s .)
+          refs=$(gh api --paginate "repos/${REPO}/git/matching-refs/tags/1." --jq '.[]' | jq -s .)
           existing=$(jq -r --arg sha "${head}" \
             '[.[] | select(.object.sha == $sha) | .ref | ltrimstr("refs/tags/")] | first // empty' <<<"${refs}")
           if [[ -n "${existing}" ]]; then
             echo "${head} is already ${existing}."
             exit 0
           fi
-          top=$(jq -c '[.[] | (.ref | capture("^refs/tags/v1\\.(?<n>[0-9]+)\\.0$")?.n | tonumber) as $n
+          top=$(jq -c '[.[] | (.ref | capture("^refs/tags/1\\.(?<n>[0-9]+)\\.0$")?.n | tonumber) as $n
                         | {n: $n, sha: .object.sha}] | max_by(.n) // {n: 0, sha: ""}' <<<"${refs}")
           n=$(jq -r .n <<<"${top}")
           top_sha=$(jq -r .sha <<<"${top}")
           if [[ -n "${top_sha}" ]]; then
             status=$(gh api "repos/${REPO}/compare/${top_sha}...${head}" --jq .status)
             if [[ "${status}" != ahead ]]; then
-              echo "::error::main (${head}) is ${status} of v1.${n}.0 (${top_sha}); remove the stray tag first."
+              echo "::error::main (${head}) is ${status} of 1.${n}.0 (${top_sha}); remove the stray tag first."
               exit 1
             fi
           fi
-          gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v1.$((n + 1)).0" -f sha="${head}" --silent
-          echo "Tagged ${head} as v1.$((n + 1)).0." | tee -a "${GITHUB_STEP_SUMMARY}"
+          gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/1.$((n + 1)).0" -f sha="${head}" --silent
+          echo "Tagged ${head} as 1.$((n + 1)).0." | tee -a "${GITHUB_STEP_SUMMARY}"
