@@ -46,7 +46,7 @@ const response = ({ value, status = 200 }) => ({
   ok: status < 400,
   status,
   json: async () => value,
-  text: async () => JSON.stringify(value)
+  text: async () => (typeof value === 'string' ? value : JSON.stringify(value))
 })
 
 let runs = 0
@@ -69,7 +69,7 @@ const run = async ({ event, pulls, routes = [], context }) => {
         return response({ value: {} })
       }
       const route = routes.find(({ match }) => path.startsWith(match))
-      if (route) return response({ value: route.value })
+      if (route) return response({ value: route.value, status: route.status })
       const one = path.match(/^\/pulls\/(\d+)$/)
       if (one) return response({ value: pulls[one[1]] })
       if (path.startsWith('/pulls?')) {
@@ -190,6 +190,54 @@ describe('a PR into a hotfix branch', () => {
     assert.deepEqual(
       requests.filter((request) => /\/commits|\/compare|\/rules/.test(request)),
       []
+    )
+  })
+})
+
+describe('a PR that changes the floors file', () => {
+  it('fails on a line the check cannot read in the file at its head', async (context) => {
+    const { statuses } = await run({
+      context,
+      event: { action: 'opened', pull_request: { number: 3 } },
+      pulls: { 3: pull({ number: 3 }) },
+      routes: [
+        {
+          match: '/pulls/3/files',
+          value: [{ filename: '.github/risk-floors.yml', status: 'modified' }]
+        },
+        {
+          match: `/contents/.github/risk-floors.yml?ref=${HEAD}`,
+          value: 'yellow:\n  src/**\n'
+        }
+      ]
+    })
+    assert.equal(
+      statuses.at(-1),
+      'aaaaaaa failure: This PR breaks the floors file: .github/risk-floors.yml line 2: ' +
+        'expected one of "yellow:", "red:", "bots:" or "  - <value>"'
+    )
+  })
+
+  it('fails, also with the emergency label, when GitHub does not return that file', async (context) => {
+    const { statuses } = await run({
+      context,
+      event: { action: 'opened', pull_request: { number: 3 } },
+      pulls: { 3: { ...pull({ number: 3 }), labels: [{ name: 'emergency' }] } },
+      routes: [
+        {
+          match: '/pulls/3/files',
+          value: [{ filename: '.github/risk-floors.yml', status: 'modified' }]
+        },
+        {
+          match: `/contents/.github/risk-floors.yml?ref=${HEAD}`,
+          value: { message: 'Bad Gateway' },
+          status: 502
+        }
+      ]
+    })
+    assert.equal(
+      statuses.at(-1),
+      'aaaaaaa failure: The check could not read the floors file of this PR (HTTP 502); run it again'
     )
   })
 })
