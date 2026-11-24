@@ -88,6 +88,17 @@ const pathsOf = (files) =>
     ...new Set([path, previousPath].filter(Boolean))
   ])
 
+// One target per changed file, on the path the diff shows: a renamed file takes the
+// higher floor of its two names.
+const floorsOf = ({ files, config }) =>
+  files.flatMap(({ path, previousPath }) => {
+    const color = [path, previousPath]
+      .filter(Boolean)
+      .map((name) => floorFor({ path: name, config }))
+      .reduce((high, floor) => (rank(floor) > rank(high) ? floor : high), null)
+    return color ? [{ path, color }] : []
+  })
+
 const isDependencyUpdate = ({ pr, files }) =>
   pr.authorLogin === 'dependabot[bot]' &&
   pathsOf(files).every(
@@ -178,13 +189,11 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
   }
 
   const sha = pr.headSha.slice(0, 7)
-  // A floor comment marks every changed file that the floors file lists, also when
-  // the approver's color meets its floor: the approver writes no finding for a
-  // minimum color (speckle-atlas#259), so this comment is the thread that someone
-  // answers for it. It does not wait for the approver's color.
-  const floors = pathsOf(files)
-    .map((path) => ({ path, color: floorFor({ path, config }) }))
-    .filter(({ color }) => color)
+  // The approver writes no finding for a minimum color (speckle-atlas#259), so the
+  // floor comment is the thread that someone answers for each floor path, also one
+  // that the approver's color meets. A PR that the check colors green itself gets
+  // none: its changes merged through PRs that got their own.
+  const floors = floorsOf({ files, config })
   const approverColor = latestApproverColor({ pr, reviews, isEngineer })
   if (!approverColor && !pr.fromFork) {
     return result({

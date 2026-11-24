@@ -109,8 +109,15 @@ const loadPicks = async ({ pull }) => {
 
 const floorMarker = (path) => `<!-- risk-floor:${path} -->`
 
+// Everything under .github/ is red with no floors file entry, so only a red floor can
+// come from that rule.
+const floorSource = {
+  yellow: `\`${FLOORS_FILE}\``,
+  red: `\`${FLOORS_FILE}\` or \`.github/\``
+}
+
 const floorBody = ({ path, color }) =>
-  `${floorMarker(path)}\n**Minimum color ${color}:** \`${path}\` matches \`${FLOORS_FILE}\`` +
+  `${floorMarker(path)}\n**Minimum color ${color}:** \`${path}\` matches ${floorSource[color]}` +
   `${color === 'red' ? ', so another engineer approves the latest commit' : ''}. ` +
   'Answer this like an approver finding: reply with why the change is safe, then resolve.'
 
@@ -233,7 +240,15 @@ const evaluate = async ({ action, pull }) => {
     return null
   }
 
-  await postFloorComments({ number, headSha: pr.headSha, floors: result.floors })
+  // A crash lets the workflow pass a PR with the emergency label, so a comment that
+  // fails must not replace a failure the label cannot pass. On a passing result the
+  // crash stays: it is how the PR that repairs a broken check merges.
+  try {
+    await postFloorComments({ number, headSha: pr.headSha, floors: result.floors })
+  } catch (error) {
+    if (result.state !== 'failure') throw error
+    console.error(error)
+  }
   for (const color of COLORS) {
     const label = `risk:${color}`
     if (color === result.color && !pr.labels.includes(label))

@@ -51,10 +51,12 @@ const response = ({ value, status = 200 }) => ({
 
 let runs = 0
 // run.mjs works on import, so each case imports it again under a new URL.
-const run = async ({ event, pulls, routes = [], context }) => {
+const run = async ({ event, pulls, routes = [], commentStatus = 200, context }) => {
   const statuses = []
   const requests = []
+  const comments = []
   context.mock.method(console, 'log', () => {})
+  context.mock.method(console, 'error', () => {})
   context.mock.method(
     globalThis,
     'fetch',
@@ -65,6 +67,10 @@ const run = async ({ event, pulls, routes = [], context }) => {
         const sent = JSON.parse(body)
         if (path.startsWith('/statuses/')) {
           statuses.push(`${path.slice(10, 17)} ${sent.state}: ${sent.description}`)
+        }
+        if (path.endsWith('/comments')) {
+          comments.push(sent)
+          return response({ value: {}, status: commentStatus })
         }
         return response({ value: {} })
       }
@@ -87,7 +93,7 @@ const run = async ({ event, pulls, routes = [], context }) => {
   )
   writeFileSync(eventPath, JSON.stringify(event))
   await import(`./run.mjs?run=${++runs}`)
-  return { statuses, requests }
+  return { statuses, requests, comments }
 }
 
 describe('two open PRs with one head commit', () => {
@@ -247,37 +253,70 @@ describe('a PR that changes a path of the floors file', () => {
     ...greenReview,
     body: `Approver result for commit ${HEAD.slice(0, 7)}: yellow\n\nMinimum color for agent configuration.`
   }
+  const changed = [
+    { filename: 'AGENTS.md', status: 'modified' },
+    { filename: 'docs/agents/b.md', previous_filename: 'docs/agents/a.md', status: 'renamed' },
+    { filename: 'src/a.ts', status: 'modified' }
+  ]
   const routes = (comments) => [
-    { match: '/pulls/3/files', value: [{ filename: 'AGENTS.md', status: 'modified' }] },
+    { match: '/pulls/3/files', value: changed },
     { match: '/pulls/3/reviews', value: [yellowReview] },
     { match: '/pulls/3/comments', value: comments },
-    { match: '/contents/.github/risk-floors.yml?ref=main', value: 'yellow:\n  - AGENTS.md\n' }
+    {
+      match: '/contents/.github/risk-floors.yml?ref=main',
+      value: 'yellow:\n  - AGENTS.md\n  - docs/agents/**\n'
+    }
   ]
-  const posted = (requests) =>
-    requests.filter((request) => request === 'POST /pulls/3/comments').length
 
-  it('gets one floor comment when the approver color meets the floor', async (context) => {
-    const { statuses, requests } = await run({
+  it('gets one floor comment on each floor path when the approver color meets the floor', async (context) => {
+    const { statuses, comments } = await run({
       context,
       event: { action: 'opened', pull_request: { number: 3 } },
       pulls: { 3: pull({ number: 3 }) },
       routes: routes([])
     })
     assert.equal(statuses.at(-1), 'aaaaaaa success: yellow: resolve each finding before the merge')
-    assert.equal(posted(requests), 1)
+    assert.deepEqual(
+      comments.map(({ path }) => path),
+      ['AGENTS.md', 'docs/agents/b.md']
+    )
   })
 
   it('gets no second floor comment on a later run', async (context) => {
-    const existing = {
+    const existing = ['AGENTS.md', 'docs/agents/b.md'].map((path) => ({
       user: { login: 'github-actions[bot]' },
-      body: '<!-- risk-floor:AGENTS.md -->\n**Minimum color yellow:** …'
-    }
-    const { requests } = await run({
+      body: `<!-- risk-floor:${path} -->\n**Minimum color yellow:** …`
+    }))
+    const { comments } = await run({
       context,
       event: { action: 'synchronize', pull_request: { number: 3 } },
       pulls: { 3: pull({ number: 3 }) },
-      routes: routes([existing])
+      routes: routes(existing)
     })
-    assert.equal(posted(requests), 0)
+    assert.deepEqual(comments, [])
+  })
+
+  it('keeps a broken floors file a failure, also with the emergency label, when GitHub refuses the floor comment', async (context) => {
+    const { statuses } = await run({
+      context,
+      event: { action: 'opened', pull_request: { number: 3 } },
+      pulls: { 3: { ...pull({ number: 3 }), labels: [{ name: 'emergency' }] } },
+      commentStatus: 422,
+      routes: [
+        {
+          match: '/pulls/3/files',
+          value: [{ filename: '.github/risk-floors.yml', status: 'modified' }]
+        },
+        {
+          match: `/contents/.github/risk-floors.yml?ref=${HEAD}`,
+          value: 'yellow:\n  src/**\n'
+        }
+      ]
+    })
+    assert.equal(
+      statuses.at(-1),
+      'aaaaaaa failure: This PR breaks the floors file: .github/risk-floors.yml line 2: ' +
+        'expected one of "yellow:", "red:", "bots:" or "  - <value>"'
+    )
   })
 })
