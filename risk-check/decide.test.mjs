@@ -51,13 +51,28 @@ describe('minimum colors', () => {
     ])
   })
 
-  it('mark no file when the approver color already meets its floor', () => {
+  it('mark the file with no raise when the approver color already meets its floor', () => {
     const result = run({
       files: files('packages/server/modules/core/migrations/001.ts'),
       reviews: [colorReview('yellow')]
     })
     assert.equal(result.color, 'yellow')
+    assert.equal(result.description, 'yellow: resolve each finding before the merge')
     assert.deepEqual(result.raisedBy, [])
+    assert.deepEqual(result.floors, [
+      { path: 'packages/server/modules/core/migrations/001.ts', color: 'yellow' }
+    ])
+  })
+
+  it('mark the file before the PR has an approver color', () => {
+    const result = run({
+      files: files('packages/server/modules/core/migrations/001.ts', 'src/a.ts'),
+      reviews: []
+    })
+    assert.equal(result.state, 'failure')
+    assert.deepEqual(result.floors, [
+      { path: 'packages/server/modules/core/migrations/001.ts', color: 'yellow' }
+    ])
   })
 
   it('keep .github/ red with no floors file entry', () => {

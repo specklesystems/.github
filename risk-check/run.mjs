@@ -233,7 +233,7 @@ const evaluate = async ({ action, pull }) => {
     return null
   }
 
-  await postFloorComments({ number, headSha: pr.headSha, floors: result.raisedBy })
+  await postFloorComments({ number, headSha: pr.headSha, floors: result.floors })
   for (const color of COLORS) {
     const label = `risk:${color}`
     if (color === result.color && !pr.labels.includes(label))

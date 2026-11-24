@@ -153,11 +153,12 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
     writers.has(login) && !login.endsWith('[bot]') && !config.bots.includes(login)
   const needed = pr.authorIsBot || !isEngineer(pr.authorLogin) ? 2 : 1
   const approvers = approversOfHead({ pr, reviews, isEngineer })
-  const result = ({ color, raisedBy = [], ...status }) => ({
+  const result = ({ color, raisedBy = [], floors = [], ...status }) => ({
     color,
     approved: approvers.length >= needed,
     emergency: false,
     raisedBy,
+    floors,
     ...status
   })
 
@@ -177,21 +178,24 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
   }
 
   const sha = pr.headSha.slice(0, 7)
+  // A floor comment marks every changed file that the floors file lists, also when
+  // the approver's color meets its floor: the approver writes no finding for a
+  // minimum color (speckle-atlas#259), so this comment is the thread that someone
+  // answers for it. It does not wait for the approver's color.
+  const floors = pathsOf(files)
+    .map((path) => ({ path, color: floorFor({ path, config }) }))
+    .filter(({ color }) => color)
   const approverColor = latestApproverColor({ pr, reviews, isEngineer })
   if (!approverColor && !pr.fromFork) {
     return result({
       color: null,
+      floors,
       state: 'failure',
       description: `No approver color for ${sha}. Run /approver ${pr.url}`
     })
   }
 
-  // A floor comment marks a file the approver colored too low. Where the approver's
-  // color already meets the floor, its own findings carry the review, so the floor
-  // adds no second thread.
-  const raisedBy = pathsOf(files)
-    .map((path) => ({ path, color: floorFor({ path, config }) }))
-    .filter(({ color }) => color && rank(color) > rank(approverColor))
+  const raisedBy = floors.filter(({ color }) => rank(color) > rank(approverColor))
   const color = raisedBy.reduce(
     (current, floor) => (rank(floor.color) > rank(current) ? floor.color : current),
     approverColor
@@ -204,6 +208,7 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
     return result({
       color,
       raisedBy,
+      floors,
       ...status,
       description: status.description + raised
     })
@@ -212,6 +217,7 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
     return result({
       color,
       raisedBy,
+      floors,
       state: 'failure',
       description: `${color ?? 'no color'}${raised}: a PR from a fork needs an approval of ${sha} from an engineer`
     })
@@ -220,6 +226,7 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
   return result({
     color,
     raisedBy,
+    floors,
     state: 'success',
     description: color
       ? `${color}${raised}${next}`

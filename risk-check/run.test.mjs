@@ -241,3 +241,43 @@ describe('a PR that changes the floors file', () => {
     )
   })
 })
+
+describe('a PR that changes a path of the floors file', () => {
+  const yellowReview = {
+    ...greenReview,
+    body: `Approver result for commit ${HEAD.slice(0, 7)}: yellow\n\nMinimum color for agent configuration.`
+  }
+  const routes = (comments) => [
+    { match: '/pulls/3/files', value: [{ filename: 'AGENTS.md', status: 'modified' }] },
+    { match: '/pulls/3/reviews', value: [yellowReview] },
+    { match: '/pulls/3/comments', value: comments },
+    { match: '/contents/.github/risk-floors.yml?ref=main', value: 'yellow:\n  - AGENTS.md\n' }
+  ]
+  const posted = (requests) =>
+    requests.filter((request) => request === 'POST /pulls/3/comments').length
+
+  it('gets one floor comment when the approver color meets the floor', async (context) => {
+    const { statuses, requests } = await run({
+      context,
+      event: { action: 'opened', pull_request: { number: 3 } },
+      pulls: { 3: pull({ number: 3 }) },
+      routes: routes([])
+    })
+    assert.equal(statuses.at(-1), 'aaaaaaa success: yellow: resolve each finding before the merge')
+    assert.equal(posted(requests), 1)
+  })
+
+  it('gets no second floor comment on a later run', async (context) => {
+    const existing = {
+      user: { login: 'github-actions[bot]' },
+      body: '<!-- risk-floor:AGENTS.md -->\n**Minimum color yellow:** …'
+    }
+    const { requests } = await run({
+      context,
+      event: { action: 'synchronize', pull_request: { number: 3 } },
+      pulls: { 3: pull({ number: 3 }) },
+      routes: routes([existing])
+    })
+    assert.equal(posted(requests), 0)
+  })
+})
