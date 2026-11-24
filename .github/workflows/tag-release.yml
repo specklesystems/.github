@@ -1,0 +1,45 @@
+name: tag-release
+
+# Every merge to main gets the next tag v1.<n>.0. Callers pin a commit, and
+# Dependabot updates a pin only when this repo has version tags, so the tag is
+# what starts the pin update in each caller (ADR-0002 amendment of 2026-11-24,
+# ENG-11742).
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tag:
+    name: Tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # to create the tag
+    steps:
+      - name: Tag the pushed commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          refs=$(gh api --paginate "repos/${REPO}/git/matching-refs/tags/v1." --jq '.[]' | jq -s .)
+          existing=$(jq -r --arg sha "${SHA}" \
+            '[.[] | select(.object.sha == $sha) | .ref | ltrimstr("refs/tags/")] | first // empty' <<<"${refs}")
+          if [[ -n "${existing}" ]]; then
+            echo "${SHA} is already ${existing}."
+            exit 0
+          fi
+          next=$(jq -r '[.[].ref | capture("^refs/tags/v1\\.(?<n>[0-9]+)\\.0$")?.n | tonumber] | (max // 0) + 1' <<<"${refs}")
+          gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v1.${next}.0" -f sha="${SHA}" --silent
+          echo "Tagged ${SHA} as v1.${next}.0." | tee -a "${GITHUB_STEP_SUMMARY}"
