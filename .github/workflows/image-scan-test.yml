@@ -1,0 +1,26 @@
+name: image-scan-test
+
+# Runs the reusable workflow on a pull request that changes it, against a public
+# image, as a calling repo does.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/image-scan.yml
+      - .github/workflows/image-scan-test.yml
+
+permissions: {}
+
+jobs:
+  image-scan:
+    permissions:
+      contents: read # the scan reads .trivyignore.yaml
+      packages: read # the scan pulls the image from ghcr.io
+    uses: ./.github/workflows/image-scan.yml
+    with:
+      IMAGE_VERSION_TAG: 0.76.2
+      IMAGE_REGISTRY_DOMAIN: ghcr.io
+      IMAGE_REGISTRY_USERNAME: ${{ github.actor }}
+      IMAGE_PREFIX: ghcr.io/aquasecurity
+      IMAGES: trivy
+    secrets:
+      IMAGE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

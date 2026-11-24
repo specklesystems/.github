@@ -1,0 +1,142 @@
+name: image-scan (reusable)
+
+# A repo calls this at a pinned commit from a job named `image-scan`, after the
+# job that pushes its images, and gives it `permissions: contents: read,
+# packages: read`. No job may need it: findings never fail it, and the weekly
+# findings review of the atlas rates them (ENG-11742). It fails only when an
+# image could not be scanned.
+#
+# The findings review finds the newest report of a repo by the artifact name
+# `image-scan` and the job name `Scan`, so both names are a contract.
+
+on:
+  workflow_call:
+    inputs:
+      IMAGE_VERSION_TAG:
+        required: true
+        type: string
+      IMAGE_REGISTRY_DOMAIN:
+        required: true
+        type: string
+      IMAGE_REGISTRY_USERNAME:
+        required: true
+        type: string
+      IMAGE_PREFIX:
+        required: true
+        type: string
+      IMAGES:
+        description: The image names to scan, separated by spaces.
+        required: true
+        type: string
+      runner:
+        description: The runs-on label of the calling repo.
+        required: false
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: >-
+          A caller whose run holds a concurrency group until every job ends sets
+          a lower cap, so a hung scan delays its next run by that long at most.
+        required: false
+        type: number
+        default: 30
+    secrets:
+      IMAGE_REGISTRY_TOKEN:
+        description: >-
+          A token that can only read the images. The job token with
+          packages: read is enough for ghcr.io; never the push token of the builds.
+        required: true
+
+permissions: {}
+
+jobs:
+  scan:
+    name: Scan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read # to read .trivyignore.yaml
+      packages: read # to pull the images from ghcr.io
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # By checksum, not through aquasecurity's actions: their tags were
+      # replaced with malware on 2026-03-19 (GHSA-69fq-xp46-6x23).
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: 0.76.2
+          TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+        run: |
+          archive="${RUNNER_TEMP}/trivy.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "${archive}" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir "${RUNNER_TEMP}/trivy"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/trivy" trivy
+
+      # The findings review records a dismissed or excepted finding in this file
+      # of the calling repo, so the scan reads it from the commit it scans.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .trivyignore.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Login to the image registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ inputs.IMAGE_REGISTRY_DOMAIN }}
+          username: ${{ inputs.IMAGE_REGISTRY_USERNAME }}
+          password: ${{ secrets.IMAGE_REGISTRY_TOKEN }}
+
+      - name: Scan the images
+        env:
+          INPUTS_IMAGE_PREFIX: ${{ inputs.IMAGE_PREFIX }}
+          INPUTS_IMAGE_VERSION_TAG: ${{ inputs.IMAGE_VERSION_TAG }}
+          INPUTS_IMAGES: ${{ inputs.IMAGES }}
+        run: |
+          mkdir reports
+          {
+            echo "### Image scan of ${INPUTS_IMAGE_VERSION_TAG}"
+            echo
+            # shellcheck disable=SC2016 # Markdown backticks, not an expansion
+            echo 'Each number counts advisories, once per image, without those in `.trivyignore.yaml`.'
+            echo
+            echo '| Image | Digest | Critical | High | Medium | Low | With a fix |'
+            echo '| --- | --- | --- | --- | --- | --- | --- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          ignore=()
+          if [[ -f .trivyignore.yaml ]]; then
+            ignore=(--ignorefile .trivyignore.yaml)
+          fi
+          failed=0
+          for image in ${INPUTS_IMAGES}; do
+            reference="${INPUTS_IMAGE_PREFIX}/${image}:${INPUTS_IMAGE_VERSION_TAG}"
+            report="reports/${image}.json"
+            if "${RUNNER_TEMP}/trivy/trivy" image --image-src remote --scanners vuln \
+              "${ignore[@]}" --format json --output "${report}" "${reference}"; then
+              jq -r --arg image "${image}" '
+                ([.Results[]?.Vulnerabilities[]?] | unique_by(.VulnerabilityID)) as $found
+                | def count($severity): $found | map(select(.Severity == $severity)) | length;
+                  [ "`\($image)`",
+                    "`\(.Metadata.RepoDigests[0] // "" | split("@")[1] // "unknown")`",
+                    count("CRITICAL"), count("HIGH"), count("MEDIUM"), count("LOW"),
+                    ($found | map(select((.FixedVersion // "") != "")) | length) ]
+                | "| \(map(tostring) | join(" | ")) |"' "${report}" >> "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "::error::Trivy could not scan ${reference}"
+              echo "| \`${image}\` | not scanned | | | | | |" >> "${GITHUB_STEP_SUMMARY}"
+              failed=1
+            fi
+          done
+          exit "${failed}"
+
+      - name: Keep the reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-scan
+          path: reports/
+          retention-days: 90
