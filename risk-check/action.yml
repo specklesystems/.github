@@ -1,0 +1,23 @@
+name: Risk check
+description: >-
+  Reads the pull requests of the event that started the workflow and writes the
+  risk-check commit status on each head. Runs no code from a pull request.
+
+inputs:
+  github-token:
+    description: >-
+      Token of the repo that holds the pull request. It reads the contents and
+      writes pull requests and commit statuses.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+      with:
+        node-version: 22
+    - name: Decide the color and write the status
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "${GITHUB_ACTION_PATH}/run.mjs"

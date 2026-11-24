@@ -1,0 +1,27 @@
+name: Risk check review (reusable)
+
+# A repo calls this at a pinned commit from a workflow named `Risk check review`, as
+# risk-check-review-self.yml does here. A review changes the risk-check result, but
+# a review event runs with a read-only token for a PR from a fork. This workflow
+# does nothing itself: the repo's Risk check workflow starts when its caller
+# completes, with a token that can write the status.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: The runs-on label of the calling repo.
+        required: true
+        type: string
+
+permissions: {} # this workflow needs no access
+
+jobs:
+  notify:
+    name: Start the risk check
+    runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false # each review starts its own risk check run
+    steps:
+      - run: 'true'

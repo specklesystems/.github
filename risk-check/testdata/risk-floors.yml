@@ -1,0 +1,29 @@
+# Test fixture for decide.test.mjs: the floors file of speckle-next on 2026-11-23,
+# when the check moved here. A repo keeps its own file at .github/risk-floors.yml.
+yellow:
+  # Migrations
+  - '**/migrations/**'
+  # Agent configuration (product code under packages/**/agents stays out)
+  - '**/AGENTS.md'
+  - '**/CLAUDE.md'
+  - agents/**
+  - docs/agents/**
+  - '**/.agents/**'
+  - '**/.claude/**'
+  - '**/.codex/**'
+  - '**/.omp/**'
+  # Authentication, permission and secrets code
+  - packages/server/modules/auth/**
+  - packages/server/modules/access/**
+  - packages/server/modules/*/authz/**
+  - packages/server/modules/shared/domain/authz/**
+  - packages/shared/src/authz/**
+  # Betterleaks exceptions
+  - '**/.betterleaks.toml'
+  - '**/.betterleaksignore'
+  - '**/.gitleaksignore'
+red:
+  - .github/**
+# Machine accounts with write access: their color reviews and approvals never count.
+bots:
+  - SpeckleDevBot

@@ -1,0 +1,13 @@
+name: Risk check review
+
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions: {}
+
+jobs:
+  notify:
+    uses: $/.github/workflows/risk-check-review.yml
+    with:
+      runner: ubuntu-24.04

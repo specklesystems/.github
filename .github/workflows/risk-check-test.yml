@@ -1,0 +1,24 @@
+name: risk-check-test
+
+on:
+  pull_request:
+    paths:
+      - risk-check/**
+      - .github/workflows/risk-check-test.yml
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: 22
+      - run: node --test risk-check/*.test.mjs
