@@ -163,10 +163,18 @@ const settleMerged = async ({ action, number, labels, result }) => {
   }
 }
 
-const loadHeadFloors = async ({ files, headSha }) =>
-  files.some(({ filename, status }) => filename === FLOORS_FILE && status !== 'removed')
-    ? api({ path: `/contents/${FLOORS_FILE}?ref=${headSha}`, raw: true })
-    : null
+// A failed read must not fail the run: the workflow passes a failed run on the
+// emergency label, and that would merge a file the check never read (.github#7).
+const loadHeadFloors = async ({ files, headSha }) => {
+  const changed = files.some(
+    ({ filename, status }) => filename === FLOORS_FILE && status !== 'removed'
+  )
+  if (!changed) return null
+  return api({ path: `/contents/${FLOORS_FILE}?ref=${headSha}`, raw: true }).then(
+    (text) => ({ text }),
+    (error) => ({ unread: error.status ? `HTTP ${error.status}` : 'no response' })
+  )
+}
 
 const evaluate = async ({ action, pull }) => {
   const number = pull.number

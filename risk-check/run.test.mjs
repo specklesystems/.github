@@ -69,7 +69,7 @@ const run = async ({ event, pulls, routes = [], context }) => {
         return response({ value: {} })
       }
       const route = routes.find(({ match }) => path.startsWith(match))
-      if (route) return response({ value: route.value })
+      if (route) return response({ value: route.value, status: route.status })
       const one = path.match(/^\/pulls\/(\d+)$/)
       if (one) return response({ value: pulls[one[1]] })
       if (path.startsWith('/pulls?')) {
@@ -215,6 +215,29 @@ describe('a PR that changes the floors file', () => {
       statuses.at(-1),
       'aaaaaaa failure: This PR breaks the floors file: .github/risk-floors.yml line 2: ' +
         'expected one of "yellow:", "red:", "bots:" or "  - <value>"'
+    )
+  })
+
+  it('fails, also with the emergency label, when GitHub does not return that file', async (context) => {
+    const { statuses } = await run({
+      context,
+      event: { action: 'opened', pull_request: { number: 3 } },
+      pulls: { 3: { ...pull({ number: 3 }), labels: [{ name: 'emergency' }] } },
+      routes: [
+        {
+          match: '/pulls/3/files',
+          value: [{ filename: '.github/risk-floors.yml', status: 'modified' }]
+        },
+        {
+          match: `/contents/.github/risk-floors.yml?ref=${HEAD}`,
+          value: { message: 'Bad Gateway' },
+          status: 502
+        }
+      ]
+    })
+    assert.equal(
+      statuses.at(-1),
+      'aaaaaaa failure: The check could not read the floors file of this PR (HTTP 502); run it again'
     )
   })
 })

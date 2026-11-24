@@ -227,22 +227,25 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) 
   })
 }
 
+const floorsProblem = ({ text, unread }) => {
+  if (unread)
+    return `The check could not read the floors file of this PR (${unread}); run it again`
+  try {
+    parseConfig(text)
+    return null
+  } catch (error) {
+    return `This PR breaks the floors file: ${error.message}`
+  }
+}
+
 // The check reads the floors file from the default branch. A file it cannot read
 // there fails every later PR, so the PR that would merge one fails instead, and the
-// emergency label does not pass it. `headFloors` is the file at the PR's head when
-// the PR changes it.
+// emergency label does not pass it. `headFloors` is set when the PR changes the
+// file: its `text` at the PR's head, or why the check got none (`unread`).
 export const decide = ({ headFloors = null, ...input }) => {
   const result = decideFromReviews(input)
-  if (headFloors === null) return result
-  try {
-    parseConfig(headFloors)
-    return result
-  } catch (error) {
-    return {
-      ...result,
-      state: 'failure',
-      emergency: false,
-      description: `This PR breaks the floors file: ${error.message}`
-    }
-  }
+  const problem = headFloors && floorsProblem(headFloors)
+  return problem
+    ? { ...result, state: 'failure', emergency: false, description: problem }
+    : result
 }

@@ -225,7 +225,7 @@ describe('a repo floors file', () => {
 })
 
 describe('a PR that changes the floors file', () => {
-  const unreadable = 'yellow:\n  src/**\n'
+  const unreadable = { text: 'yellow:\n  src/**\n' }
   const approved = {
     files: files('.github/risk-floors.yml'),
     reviews: [colorReview('red'), approval('bob')]
@@ -243,7 +243,10 @@ describe('a PR that changes the floors file', () => {
   })
 
   it('fails while the file at its head has a path the check cannot match', () => {
-    const result = run({ ...approved, headFloors: 'red:\n  - src/a**b\n' })
+    const result = run({
+      ...approved,
+      headFloors: { text: 'red:\n  - src/a**b\n' }
+    })
     assert.equal(result.state, 'failure')
     assert.match(result.description, /whole path segment: src\/a\*\*b/)
   })
@@ -260,8 +263,23 @@ describe('a PR that changes the floors file', () => {
   })
 
   it('passes on its approval when the file at its head reads', () => {
-    const result = run({ ...approved, headFloors: 'red:\n  - src/**\n' })
+    const result = run({ ...approved, headFloors: { text: 'red:\n  - src/**\n' } })
     assert.equal(result.state, 'success')
+  })
+
+  it('fails when the check got no file at its head, also with the emergency label', () => {
+    const result = run({
+      pr: pr({ labels: ['emergency'] }),
+      files: files('.github/risk-floors.yml'),
+      reviews: [colorReview('red')],
+      headFloors: { unread: 'HTTP 502' }
+    })
+    assert.equal(result.state, 'failure')
+    assert.equal(result.emergency, false)
+    assert.equal(
+      result.description,
+      'The check could not read the floors file of this PR (HTTP 502); run it again'
+    )
   })
 })
 
