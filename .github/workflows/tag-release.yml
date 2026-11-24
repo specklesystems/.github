@@ -63,7 +63,7 @@ jobs:
           if [[ -n "${top_sha}" ]]; then
             status=$(gh api "repos/${REPO}/compare/${top_sha}...${head}" --jq .status)
             if [[ "${status}" != ahead ]]; then
-              echo "::error::main (${head}) is ${status} of 1.${n}.0 (${top_sha}); remove the stray tag first."
+              echo "::error::main (${head}) is ${status} of 1.${n}.0 (${top_sha}); an org admin deletes that stray tag first (ruleset 27993066)."
               exit 1
             fi
           fi
