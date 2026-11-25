@@ -234,8 +234,8 @@ const evaluate = async ({ action, pull }) => {
 
   // A crash lets the workflow pass a PR with the emergency label (failed-run.mjs),
   // and the label never waives a missing approver color, so a comment that fails
-  // keeps a failing result. A passing result still crashes: no PR passes without
-  // its floor comments.
+  // keeps a failing result. A passing result still crashes, so only the emergency
+  // label passes a PR whose floor comments failed.
   try {
     await postFloorComments({ number, headSha: pr.headSha, floors: result.floors })
   } catch (error) {
