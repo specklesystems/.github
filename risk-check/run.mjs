@@ -162,10 +162,23 @@ const loadHeadFloors = async ({ files, headSha }) => {
   )
 }
 
-// On the merge, an evaluation that cannot finish still records the review owed.
+// On the merge, an evaluation that cannot finish still records the review owed,
+// and the error still fails the run.
 const owesOnFailure = ({ action, pull }) => pull.merged && action === 'closed'
 
-const evaluate = async ({ action, removed, pull }) => {
+const recordFailure =
+  ({ action, pull }) =>
+  async (error) => {
+    if (owesOnFailure({ action, pull })) {
+      await oweReview({
+        number: pull.number,
+        reason: `the evaluation failed: ${error.message}`
+      })
+    }
+    throw error
+  }
+
+const evaluate = async ({ action, removed, emergencyAtMerge, pull }) => {
   const number = pull.number
   const baseRef = pull.base.ref
   const fromFork = pull.head.repo?.full_name !== pull.base.repo.full_name
@@ -196,7 +209,12 @@ const evaluate = async ({ action, removed, pull }) => {
     url: pull.html_url,
     authorLogin: pull.user.login,
     authorIsBot: pull.user.type === 'Bot',
-    labels: pull.labels.map(({ name }) => name),
+    labels: [
+      ...new Set([
+        ...pull.labels.map(({ name }) => name),
+        ...(emergencyAtMerge ? ['emergency'] : [])
+      ])
+    ],
     baseRef,
     headRef: pull.head.ref,
     headGated,
@@ -218,25 +236,18 @@ const evaluate = async ({ action, removed, pull }) => {
     picks
   }
   const named = reviewLineToTrace(input)
-  const labelAtStake = removed === LABEL || pr.labels.includes(LABEL)
-  const settling = pull.merged && (action === 'closed' || labelAtStake)
-  const pusherMatters = labelAtStake || pr.labels.includes('emergency')
+  const pusherMatters =
+    removed === LABEL || pr.labels.includes(LABEL) || pr.labels.includes('emergency')
   const result = decide({
     ...input,
     commits: named ? await loadCommits({ pull, named }) : null,
-    merge: settling ? await loadMerge({ pull, pusherMatters }) : undefined
+    merge: pull.merged ? await loadMerge({ pull, pusherMatters }) : undefined
   })
   console.log(JSON.stringify({ number, headSha: pr.headSha, ...result }, null, 2))
 
   if (pull.state === 'closed') {
-    if (settling) {
-      await settleMerged({
-        action,
-        removed,
-        number,
-        labels: pr.labels,
-        afterMerge: result.afterMerge
-      })
+    if (pull.merged) {
+      await settleMerged({ number, labels: pr.labels, afterMerge: result.afterMerge })
     }
     return null
   }
@@ -256,26 +267,34 @@ const evaluate = async ({ action, removed, pull }) => {
 // workflow only starts this one through workflow_run. That event names no PR, and
 // for a PR from a fork it names the base repo as the head repo
 // (change-gate-sandbox#2), so the PR is found by its head commit. A submitted
-// review updates the PR, which puts it near the top of the list. Merged PRs stay
-// in the list for their late approval.
+// review updates the PR, which puts it near the top of the list. A closed PR with
+// the same head does not end the search: merged PRs stay in the list for their
+// late approval, and an open one can be further down.
 const pullsOf = async ({ event }) => {
   if (event.pull_request) {
     return [await api({ path: `/pulls/${event.pull_request.number}` })]
   }
   const run = event.workflow_run
+  const found = []
+  let full = true
   for (let page = 1; page <= MAX_LIST_PAGES; page++) {
     const pulls = await api({
       path: `/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`
     })
-    const matches = pulls.filter((pull) => pull.head.sha === run.head_sha)
-    if (matches.length || pulls.length < 100) {
-      return Promise.all(matches.map(({ number }) => api({ path: `/pulls/${number}` })))
-    }
+    found.push(...pulls.filter((pull) => pull.head.sha === run.head_sha))
+    full = pulls.length === 100
+    if (found.some(({ state }) => state === 'open') || !full) break
   }
-  return []
+  if (!found.length && full) {
+    throw new Error(
+      `No PR with the head commit ${run.head_sha} among the ` +
+        `${MAX_LIST_PAGES * 100} most recently updated PRs`
+    )
+  }
+  return Promise.all(found.map(({ number }) => api({ path: `/pulls/${number}` })))
 }
 
-const settle = async ({ action, removed = null, pull }) => {
+const settle = async ({ action, removed = null, emergencyAtMerge = false, pull }) => {
   const defaultBranch = pull.base.repo.default_branch
   if (!isGated({ baseRef: pull.base.ref, defaultBranch })) return
   const open = pull.state === 'open'
@@ -290,15 +309,9 @@ const settle = async ({ action, removed = null, pull }) => {
         state: 'failure',
         description: `${headSha.slice(0, 7)} is also the head of ${others.map((n) => `#${n}`).join(', ')}; open one PR per commit`
       }
-    : await evaluate({ action, removed, pull }).catch(async (error) => {
-        if (owesOnFailure({ action, pull })) {
-          await oweReview({
-            number: pull.number,
-            reason: `the evaluation failed: ${error.message}`
-          })
-        }
-        throw error
-      })
+    : await evaluate({ action, removed, emergencyAtMerge, pull }).catch(
+        recordFailure({ action, pull })
+      )
   if (result && open) {
     await setStatus({
       sha: headSha,
@@ -326,10 +339,23 @@ const settleReleased = async ({ event, pull }) => {
 }
 
 const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'))
-for (const pull of await pullsOf({ event })) {
+const merging = event.action === 'closed' && event.pull_request?.merged
+const pulls = await pullsOf({ event }).catch(async (error) => {
+  if (merging) {
+    await oweReview({
+      number: event.pull_request.number,
+      reason: `the check could not read the PR: ${error.message}`
+    })
+  }
+  throw error
+})
+for (const pull of pulls) {
   await settle({
     action: event.action,
     removed: event.action === 'unlabeled' ? event.label?.name : null,
+    emergencyAtMerge:
+      event.action === 'closed' &&
+      (event.pull_request?.labels ?? []).some(({ name }) => name === 'emergency'),
     pull
   })
   await settleReleased({ event, pull })

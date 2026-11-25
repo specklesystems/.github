@@ -286,6 +286,11 @@ const afterMerge = ({ pr, reviews, writers, config, merge, result }) => {
   ).length
   const required = merge.unread ? 0 : merge.requiredApprovals
   const plural = (n) => `${n} approval${n === 1 ? '' : 's'}`
+  const passed = result.state === 'success' && !result.emergency
+  // The approval that settles a red change, or one that got past the gate, is
+  // the count the gate asks of a red change, without the person who pushed last.
+  const strict = !passed || result.color === 'red'
+  const ownRule = neededApprovals({ pr, isEngineer })
   const reasons = [
     result.state !== 'success' && `the check did not pass: ${result.description}`,
     result.emergency && 'it passed on the emergency label',
@@ -296,10 +301,7 @@ const afterMerge = ({ pr, reviews, writers, config, merge, result }) => {
       count === 0 &&
       'it merged with the emergency label and no approval'
   ].filter(Boolean)
-  // The review owed is the one whose absence owed it: the evaluation's own count
-  // when the evaluation failed or passed on the emergency label.
-  const passed = result.state === 'success' && !result.emergency
-  const needed = Math.max(required, passed ? 1 : neededApprovals({ pr, isEngineer }))
+  const needed = Math.max(required, strict ? ownRule : 1)
   return {
     owes: reasons.length > 0,
     reviewed: !merge.unread && count >= needed,

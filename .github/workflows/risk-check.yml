@@ -35,7 +35,10 @@ jobs:
       startsWith(github.event.pull_request.base.ref, 'hotfix-')
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: risk-check-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+      group: >-
+        risk-check-${{ github.event.pull_request.head.label ||
+        format('{0}:{1}', github.event.workflow_run.head_repository.owner.login,
+        github.event.workflow_run.head_branch) }}
       cancel-in-progress: false # each run reads the PR afresh; a queued run must still write its status
     permissions:
       contents: read # the floors file from the default branch

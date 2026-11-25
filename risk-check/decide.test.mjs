@@ -600,6 +600,25 @@ describe('after the merge', () => {
     )
   })
 
+  it('owes nothing for a red PR that passes the gate, and settles one with two approvals not from the pusher', () => {
+    const outsider = pr({ authorLogin: 'mallory' })
+    const red = [
+      colorReview('red', { login: 'bob' }),
+      approval('bob'),
+      approval('carol')
+    ]
+    const pushedByCarol = merge({ pushedBy: ['carol'] })
+    assert.equal(run({ pr: outsider, reviews: red }).state, 'success')
+    const result = merged({ pr: outsider, reviews: red, merge: pushedByCarol })
+    assert.deepEqual(result, { owes: false, reviewed: false, reasons: [] })
+    const third = merged({
+      pr: outsider,
+      reviews: [...red, approval('alice')],
+      merge: pushedByCarol
+    })
+    assert.deepEqual(third, { owes: false, reviewed: true, reasons: [] })
+  })
+
   it('names the count when an emergency merge had fewer approvals than its branch needs', () => {
     const result = merged({
       pr: pr({ labels: ['emergency'] }),

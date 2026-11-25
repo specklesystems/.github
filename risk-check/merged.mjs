@@ -61,19 +61,14 @@ export const oweReview = async ({ number, reason }) => {
   await addLabel({ number, label: LABEL })
 }
 
-// Whoever can triage can remove the label, so it comes back until the review is
-// in. The check removes it only once `reviewed` holds, so its own removal does not
-// bring it back.
-export const settleMerged = async ({ action, removed, number, labels, afterMerge }) => {
-  const owes =
-    (action === 'closed' && afterMerge.owes) ||
-    (removed === LABEL && !afterMerge.reviewed)
-  if (owes) {
-    await oweReview({
-      number,
-      reason: afterMerge.reasons.join('; ') || 'no review yet'
-    })
-  } else if (labels.includes(LABEL) && afterMerge.reviewed) {
+// One rule on every event of a merged PR, so a run that replaces the run of the
+// merge still records it, a removed label comes back until the review is in, and
+// a label added by mistake goes away.
+export const settleMerged = async ({ number, labels, afterMerge }) => {
+  const owed = afterMerge.owes && !afterMerge.reviewed
+  if (owed && !labels.includes(LABEL)) {
+    await oweReview({ number, reason: afterMerge.reasons.join('; ') })
+  } else if (!owed && labels.includes(LABEL)) {
     await removeLabel({ number, label: LABEL })
   }
 }
