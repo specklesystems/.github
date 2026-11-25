@@ -69,7 +69,9 @@ export const settleMerged = async ({ number, labels, removed, afterMerge }) => {
   if (afterMerge.reviewed) {
     if (present) await removeLabel({ number, label: LABEL })
   } else if (!present && (afterMerge.owes || removed === LABEL)) {
-    const reasons = afterMerge.owes ? afterMerge.reasons : ['removed without the review']
-    await oweReview({ number, reason: reasons.join('; ') })
+    const reason = afterMerge.owes
+      ? afterMerge.reasons.join('; ')
+      : 'removed without the review'
+    await oweReview({ number, reason })
   }
 }
