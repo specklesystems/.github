@@ -1,7 +1,7 @@
 name: Risk check (reusable)
 
-# A repo calls this from `main` in a workflow named `Risk check`, as
-# risk-check-self.yml does here. GitHub takes a workflow file for
+# A repo calls this from `main` (ADR-0004) in a workflow named `Risk check`,
+# as risk-check-self.yml does here. GitHub takes a workflow file for
 # pull_request_target and workflow_run from the default branch of the repo that
 # holds the pull request, so the triggers stay in that repo. The job never checks
 # out or runs code from the pull request.

@@ -24,18 +24,23 @@ workflows for `specklesystems/.github/`. Rules: ADR-0004 in the atlas,
 
 1. No repo tries a change first. `callers-test.yml` makes GitHub load the
    pull request's risk check workflows with the callers' inputs and
-   permissions: a run that fails there would fail in every caller.
+   permissions, and runs no step: a run that fails there would fail in
+   every caller. It is advisory (ruleset 27554748 requires no status
+   check), so read it before approving. A broken `risk-check/action.yml`
+   or step still reaches every caller; only the unit tests cover the
+   scripts.
 2. Only an org admin can create a tag here (ruleset 27993066), so `main`
    names only the branch.
 3. A new caller references `@main`. If it runs zizmor, its
    `.github/zizmor.yml` sets the `unpinned-uses` policy
    `specklesystems/.github/*: ref-pin`.
 
-Inputs, secrets, job names and artifact names are the contract with the
-callers: a merge must not need a change in a caller. Add an input as
-optional with a default; to remove or rename one, change the callers
-first. The atlas findings review reads the `image-scan` artifact and the
-job `Scan`.
+Inputs, secrets, the permissions a job asks for, job names and artifact
+names are the contract with the callers: a merge must not need a change in
+a caller. Add an input as optional with a default. To remove or rename one,
+or to ask for a new permission, change the callers first, then
+`callers-test.yml`. The atlas findings review reads the `image-scan`
+artifact and the job `Scan`.
 
 ## Agent config (ADR-0008)
 
