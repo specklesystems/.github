@@ -62,12 +62,20 @@ const response = ({ value, status = 200 }) => ({
 let runs = 0
 // run.mjs works on import, so each case imports it again under a new URL. A case
 // that expects the run to fail sets `throws`, and gets the error back.
-const run = async ({ event, pulls, routes = [], context, throws = false }) => {
+const run = async ({
+  event,
+  pulls,
+  routes = [],
+  context,
+  throws = false,
+  commentStatus = 200
+}) => {
   const statuses = []
   const requests = []
   const labels = []
   const comments = []
   context.mock.method(console, 'log', () => {})
+  context.mock.method(console, 'error', () => {})
   context.mock.method(
     globalThis,
     'fetch',
@@ -82,7 +90,10 @@ const run = async ({ event, pulls, routes = [], context, throws = false }) => {
         if (method === 'POST' && /^\/issues\/\d+\/labels$/.test(path)) {
           labels.push(...sent.labels)
         }
-        if (path.endsWith('/comments')) comments.push(sent)
+        if (/^\/pulls\/\d+\/comments$/.test(path)) {
+          comments.push(sent)
+          return response({ value: {}, status: commentStatus })
+        }
         return response({ value: {} })
       }
       const route = routes.find(({ match }) => path.startsWith(match))
@@ -285,9 +296,9 @@ describe('a PR that changes a path the floors file lists', () => {
     { filename: 'docs/agents/b.md', previous_filename: 'docs/agents/a.md', status: 'renamed' },
     { filename: 'src/a.ts', status: 'modified' }
   ]
-  const routes = (comments) => [
+  const routes = ({ comments = [], reviews = [yellowReview] } = {}) => [
     { match: '/pulls/3/files', value: changed },
-    { match: '/pulls/3/reviews', value: [yellowReview] },
+    { match: '/pulls/3/reviews', value: reviews },
     { match: '/pulls/3/comments', value: comments },
     {
       match: '/contents/.github/risk-floors.yml?ref=main',
@@ -300,7 +311,7 @@ describe('a PR that changes a path the floors file lists', () => {
       context,
       event: { action: 'opened', pull_request: { number: 3 } },
       pulls: { 3: pull({ number: 3 }) },
-      routes: routes([])
+      routes: routes()
     })
     assert.equal(statuses.at(-1), 'aaaaaaa success: yellow: resolve each finding before the merge')
     assert.deepEqual(
@@ -318,9 +329,21 @@ describe('a PR that changes a path the floors file lists', () => {
       context,
       event: { action: 'synchronize', pull_request: { number: 3 } },
       pulls: { 3: pull({ number: 3 }) },
-      routes: routes(existing)
+      routes: routes({ comments: existing })
     })
     assert.deepEqual(comments, [])
+  })
+
+  it('gets its floor comments before an approver color, and stays failing with the emergency label when GitHub refuses one', async (context) => {
+    const { statuses, comments } = await run({
+      context,
+      event: { action: 'opened', pull_request: { number: 3 } },
+      pulls: { 3: pull({ number: 3, labels: ['emergency'] }) },
+      routes: routes({ reviews: [] }),
+      commentStatus: 403
+    })
+    assert.equal(comments[0].path, 'AGENTS.md')
+    assert.match(statuses.at(-1), /^aaaaaaa failure: No approver color for aaaaaaa/)
   })
 })
 

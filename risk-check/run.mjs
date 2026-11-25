@@ -107,17 +107,14 @@ const loadPicks = async ({ pull }) => {
 
 const floorMarker = (path) => `<!-- risk-floor:${path} -->`
 
-// Everything under .github/ is red with no floors file entry, so only a red floor can
-// come from that rule.
-const floorSource = {
-  yellow: `\`${FLOORS_FILE}\``,
-  red: `\`${FLOORS_FILE}\` or \`.github/\``
+const floorBody = ({ path, name, color, rule }) => {
+  const match = name === path ? `\`${path}\`` : `\`${path}\` was \`${name}\`, which`
+  return (
+    `${floorMarker(path)}\n**Minimum color ${color}:** ${match} matches \`${rule}\`` +
+    `${color === 'red' ? ', so another engineer approves the latest commit' : ''}. ` +
+    'Answer this like an approver finding: reply with why the change is safe, then resolve.'
+  )
 }
-
-const floorBody = ({ path, color }) =>
-  `${floorMarker(path)}\n**Minimum color ${color}:** \`${path}\` matches ${floorSource[color]}` +
-  `${color === 'red' ? ', so another engineer approves the latest commit' : ''}. ` +
-  'Answer this like an approver finding: reply with why the change is safe, then resolve.'
 
 const postFloorComments = async ({ number, headSha, floors }) => {
   if (!floors.length) return

@@ -77,10 +77,11 @@ const matchesAny = ({ path, globs }) =>
 
 // Every change under .github/ is red, whatever the floors file says: these files
 // define the checks themselves, the floors file included.
-export const floorFor = ({ path, config }) => {
-  if (path.startsWith('.github/') || matchesAny({ path, globs: config.red }))
-    return 'red'
-  if (matchesAny({ path, globs: config.yellow })) return 'yellow'
+export const floorRule = ({ path, config }) => {
+  if (path.startsWith('.github/')) return { color: 'red', rule: '.github/' }
+  const rule = '.github/risk-floors.yml'
+  if (matchesAny({ path, globs: config.red })) return { color: 'red', rule }
+  if (matchesAny({ path, globs: config.yellow })) return { color: 'yellow', rule }
   return null
 }
 
@@ -90,14 +91,17 @@ const pathsOf = (files) =>
   ])
 
 // One target per changed file, on the path the diff shows: a renamed file takes the
-// higher floor of its two names.
+// higher floor of its two names, and `name` is the one that set it.
 const floorsOf = ({ files, config }) =>
   files.flatMap(({ path, previousPath }) => {
-    const color = [path, previousPath]
+    const [top] = [path, previousPath]
       .filter(Boolean)
-      .map((name) => floorFor({ path: name, config }))
-      .reduce((high, floor) => (rank(floor) > rank(high) ? floor : high), null)
-    return color ? [{ path, color }] : []
+      .flatMap((name) => {
+        const floor = floorRule({ path: name, config })
+        return floor ? [{ name, ...floor }] : []
+      })
+      .sort((a, b) => rank(b.color) - rank(a.color))
+    return top ? [{ path, ...top }] : []
   })
 
 const isDependencyUpdate = ({ pr, files }) =>
@@ -194,7 +198,8 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
   // The approver writes no finding for a minimum color (speckle-atlas#259), so the
   // floor comment is the thread that someone answers for each floor path, also one
   // that the approver's color meets. A PR that the check colors green itself gets
-  // none: its changes merged through PRs that got their own.
+  // none: it moves changes that got theirs on their own PRs, or only bumps
+  // dependencies.
   const floors = floorsOf({ files, config })
   const approverColor = latestApproverColor({ pr, reviews, isEngineer })
   if (!approverColor && !pr.fromFork) {

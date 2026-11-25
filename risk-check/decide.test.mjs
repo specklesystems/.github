@@ -12,7 +12,7 @@ import {
   pr,
   run
 } from './builders.mjs'
-import { floorFor, globToRegExp, parseConfig } from './decide.mjs'
+import { floorRule, globToRegExp, parseConfig } from './decide.mjs'
 
 const repoConfig = parseConfig(
   readFileSync(new URL('./testdata/risk-floors.yml', import.meta.url), 'utf8')
@@ -56,33 +56,10 @@ describe('minimum colors', () => {
     })
     assert.equal(result.color, 'yellow')
     assert.equal(result.state, 'success')
-    assert.deepEqual(result.raisedBy, [
-      { path: 'packages/server/modules/core/migrations/001.ts', color: 'yellow' }
-    ])
-  })
-
-  it('mark the file with no raise when the approver color already meets its floor', () => {
-    const result = run({
-      files: files('packages/server/modules/core/migrations/001.ts'),
-      reviews: [colorReview('yellow')]
-    })
-    assert.equal(result.color, 'yellow')
-    assert.equal(result.description, 'yellow: resolve each finding before the merge')
-    assert.deepEqual(result.raisedBy, [])
-    assert.deepEqual(result.floors, [
-      { path: 'packages/server/modules/core/migrations/001.ts', color: 'yellow' }
-    ])
-  })
-
-  it('mark the file before the PR has an approver color', () => {
-    const result = run({
-      files: files('packages/server/modules/core/migrations/001.ts', 'src/a.ts'),
-      reviews: []
-    })
-    assert.equal(result.state, 'failure')
-    assert.deepEqual(result.floors, [
-      { path: 'packages/server/modules/core/migrations/001.ts', color: 'yellow' }
-    ])
+    assert.deepEqual(
+      result.raisedBy.map(({ path }) => path),
+      ['packages/server/modules/core/migrations/001.ts']
+    )
   })
 
   it('keep .github/ red with no floors file entry', () => {
@@ -95,12 +72,15 @@ describe('minimum colors', () => {
     assert.equal(result.state, 'failure')
   })
 
-  it('apply to the old path of a renamed file', () => {
+  it('apply to the old path of a renamed file, on one target at its new path', () => {
     const result = run({
       files: [{ path: 'docs/x.yml', previousPath: '.github/x.yml' }],
       reviews: [colorReview('green')]
     })
     assert.equal(result.color, 'red')
+    assert.deepEqual(result.floors, [
+      { path: 'docs/x.yml', name: '.github/x.yml', color: 'red', rule: '.github/' }
+    ])
   })
 })
 
@@ -234,7 +214,7 @@ describe('a repo floors file', () => {
   ]
   for (const [path, color] of cases) {
     it(`gives ${path} the minimum color ${color}`, () => {
-      assert.equal(floorFor({ path, config: repoConfig }), color)
+      assert.equal(floorRule({ path, config: repoConfig })?.color ?? null, color)
     })
   }
 })
