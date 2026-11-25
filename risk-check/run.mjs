@@ -1,25 +1,23 @@
 import { readFile } from 'node:fs/promises'
-import { COLORS, decide, parseConfig } from './decide.mjs'
+import { COLORS, decide, parseConfig, reviewLineToTrace } from './decide.mjs'
 import {
   addLabel,
   api,
   paginate,
   removeLabel,
   setStatus,
-  unless404
+  unless404,
+  unlessMissing
 } from './github.mjs'
+import { LABEL, loadMerge, settleMerged } from './merged.mjs'
 import { isGated, pickedFrom } from './moved.mjs'
+import { loadCommits } from './review-commits.mjs'
 
 const FLOORS_FILE = '.github/risk-floors.yml'
 const WRITE_PERMISSIONS = new Set(['admin', 'write'])
 const COMMIT_FILES_PAGE = 300
 const MAX_PICKS = 20
-
-// GitHub answers 422 for a commit sha it does not know.
-const unlessMissing = (fallback) => (error) => {
-  if ([404, 422].includes(error.status)) return fallback
-  throw error
-}
+const MAX_LIST_PAGES = 10
 
 const loadConfig = async ({ defaultBranch }) =>
   parseConfig(
@@ -151,18 +149,6 @@ const otherPullsWithHead = async ({ pull }) =>
     )
     .map(({ number }) => number)
 
-// A PR that merged while the check did not pass got past the gate, because the
-// ruleset did not require risk-check then. A PR that passed on the emergency label
-// merged without its approval. Both owe a review after the merge.
-const settleMerged = async ({ action, number, labels, result }) => {
-  const owes = result.state !== 'success' || result.emergency
-  if (action === 'closed' && owes) {
-    await addLabel({ number, label: 'review-after-merge' })
-  } else if (labels.includes('review-after-merge') && result.approved) {
-    await removeLabel({ number, label: 'review-after-merge' })
-  }
-}
-
 // A failed read must not fail the run: the workflow passes a failed run on the
 // emergency label, and that would merge a file the check never read (.github#7).
 const loadHeadFloors = async ({ files, headSha }) => {
@@ -188,15 +174,14 @@ const evaluate = async ({ action, pull }) => {
     pull.head.ref === 'dev' ? requiresRiskCheck({ branch: 'dev' }) : false
   ])
   if (files.length < pull.changed_files) {
-    return {
-      state: 'failure',
-      description: `GitHub lists only ${files.length} of the ${pull.changed_files} changed files; split the PR`
-    }
+    const description = `GitHub lists only ${files.length} of the ${pull.changed_files} changed files; split the PR`
+    return { state: 'failure', description }
   }
   const reviewList = reviews
     .filter((review) => review.user)
     .map((review) => ({
       login: review.user.login,
+      isBot: review.user.type === 'Bot',
       state: review.state,
       commitId: review.commit_id,
       body: review.body
@@ -210,9 +195,10 @@ const evaluate = async ({ action, pull }) => {
     baseRef,
     headRef: pull.head.ref,
     headGated,
-    fromFork
+    fromFork,
+    description: pull.body ?? ''
   }
-  const result = decide({
+  const input = {
     pr,
     files: files.map(({ filename, previous_filename }) => ({
       path: filename,
@@ -225,11 +211,20 @@ const evaluate = async ({ action, pull }) => {
     config,
     headFloors: await loadHeadFloors({ files, headSha: pull.head.sha }),
     picks
+  }
+  const named = reviewLineToTrace(input)
+  const result = decide({
+    ...input,
+    commits: named ? await loadCommits({ pull, named }) : null,
+    merge: pull.merged ? await loadMerge({ branch: baseRef }) : undefined
   })
   console.log(JSON.stringify({ number, headSha: pr.headSha, ...result }, null, 2))
 
   if (pull.state === 'closed') {
-    if (pull.merged) await settleMerged({ action, number, labels: pr.labels, result })
+    if (pull.merged) {
+      const { afterMerge } = result
+      await settleMerged({ action, number, labels: pr.labels, afterMerge })
+    }
     return null
   }
 
@@ -245,28 +240,45 @@ const evaluate = async ({ action, pull }) => {
 }
 
 // A review event runs with a read-only token for a PR from a fork, so the review
-// workflow only starts this one through workflow_run. That event names a head
-// commit and branch, not a PR.
+// workflow only starts this one through workflow_run. That event names no PR, and
+// for a PR from a fork it names the base repo as the head repo
+// (change-gate-sandbox#2), so the PR is found by its head commit. A submitted
+// review updates the PR, which puts it near the top of the list. A closed PR with
+// the same head does not end the search: merged PRs stay in the list for their
+// late approval, and an open one can be further down.
 const pullsOf = async ({ event }) => {
   if (event.pull_request) {
     return [await api({ path: `/pulls/${event.pull_request.number}` })]
   }
   const run = event.workflow_run
-  if (!run.head_repository) return []
-  const head = encodeURIComponent(
-    `${run.head_repository.owner.login}:${run.head_branch}`
-  )
-  const pulls = await api({ path: `/pulls?state=all&per_page=100&head=${head}` })
-  return Promise.all(
-    pulls
-      .filter((pull) => pull.head.sha === run.head_sha)
-      .map(({ number }) => api({ path: `/pulls/${number}` }))
-  )
+  const covered = ({ state, base }) =>
+    state === 'open' &&
+    isGated({ baseRef: base.ref, defaultBranch: base.repo.default_branch })
+  const found = []
+  let full = true
+  for (let page = 1; page <= MAX_LIST_PAGES; page++) {
+    const pulls = await api({
+      path: `/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`
+    })
+    found.push(...pulls.filter((pull) => pull.head.sha === run.head_sha))
+    full = pulls.length === 100
+    if (found.some(covered) || !full) break
+  }
+  if (!found.length && full) {
+    throw new Error(
+      `No PR with the head commit ${run.head_sha} among the ` +
+        `${MAX_LIST_PAGES * 100} most recently updated PRs`
+    )
+  }
+  return Promise.all(found.map(({ number }) => api({ path: `/pulls/${number}` })))
 }
 
 const settle = async ({ action, pull }) => {
   const defaultBranch = pull.base.repo.default_branch
   if (!isGated({ baseRef: pull.base.ref, defaultBranch })) return
+  // After the merge event, only a PR that carries the label has anything to settle.
+  const labelled = pull.labels.some(({ name }) => name === LABEL)
+  if (pull.merged && action !== 'closed' && !labelled) return
   const open = pull.state === 'open'
   const headSha = pull.head.sha
   // Pending first: a label or review change can turn an earlier pass into a failure,

@@ -20,8 +20,16 @@ export const pr = (overrides = {}) => ({
   headRef: 'alice/change',
   headGated: false,
   fromFork: false,
+  description: `Summary.\n\nReviewed at ${HEAD.slice(0, 7)}`,
   ...overrides
 })
+
+export const commit = (sha, ...parents) => ({
+  sha,
+  parents: parents.map(([parentSha, onBase]) => ({ sha: parentSha, onBase }))
+})
+
+export const merge = (overrides = {}) => ({ requiredApprovals: 1, ...overrides })
 
 export const colorReview = (color, overrides = {}) => ({
   login: 'alice',

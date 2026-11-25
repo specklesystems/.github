@@ -40,6 +40,12 @@ export const unless404 = (fallback) => (error) => {
   throw error
 }
 
+// GitHub answers 422 for a commit sha it does not know.
+export const unlessMissing = (fallback) => (error) => {
+  if ([404, 422].includes(error.status)) return fallback
+  throw error
+}
+
 export const setStatus = ({ sha, state, description }) =>
   api({
     method: 'POST',
