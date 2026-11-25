@@ -1,4 +1,5 @@
 import { movesMergedChanges } from './moved.mjs'
+import { reviewLineProblem, reviewedCommit } from './review-line.mjs'
 
 export const COLORS = ['green', 'yellow', 'red']
 
@@ -115,22 +116,28 @@ const latestApproverColor = ({ pr, reviews, isEngineer }) => {
   return colors.at(-1) ?? null
 }
 
-const approversOfHead = ({ pr, reviews, isEngineer }) => {
+const engineerIn =
+  ({ writers, config }) =>
+  (login) =>
+    writers.has(login) && !login.endsWith('[bot]') && !config.bots.includes(login)
+
+const neededApprovals = ({ pr, isEngineer }) =>
+  pr.authorIsBot || !isEngineer(pr.authorLogin) ? 2 : 1
+
+const approvalsOfHead = ({ pr, reviews, isEngineer }) => {
   const latestByReviewer = new Map()
   for (const review of reviews) {
     if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)) {
       latestByReviewer.set(review.login, review)
     }
   }
-  return [...latestByReviewer.values()]
-    .filter(
-      (review) =>
-        review.state === 'APPROVED' &&
-        review.commitId === pr.headSha &&
-        review.login !== pr.authorLogin &&
-        isEngineer(review.login)
-    )
-    .map((review) => review.login)
+  return [...latestByReviewer.values()].filter(
+    (review) =>
+      review.state === 'APPROVED' &&
+      review.commitId === pr.headSha &&
+      review.login !== pr.authorLogin &&
+      isEngineer(review.login)
+  )
 }
 
 // The emergency label does nothing on a PR from a fork: an engineer who needs the
@@ -157,36 +164,31 @@ const redStatus = ({ pr, approvers, needed }) => {
   }
 }
 
-// `approved` says whether engineers other than the author approved the head, whatever
-// the color, so a later color review cannot settle a review owed after an emergency.
-const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) => {
-  const isEngineer = (login) =>
-    writers.has(login) && !login.endsWith('[bot]') && !config.bots.includes(login)
-  const needed = pr.authorIsBot || !isEngineer(pr.authorLogin) ? 2 : 1
-  const approvers = approversOfHead({ pr, reviews, isEngineer })
+// The check colors these PRs itself, so they need no approver color and no code
+// review line.
+const ownColor = ({ pr, files, picks = [] }) => {
+  if (movesMergedChanges({ pr, picks }))
+    return 'green: moves changes that already merged'
+  if (isDependencyUpdate({ pr, files })) return 'green: Dependabot dependency update'
+  return null
+}
+
+const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
+  const isEngineer = engineerIn({ writers, config })
+  const needed = neededApprovals({ pr, isEngineer })
+  const approvers = approvalsOfHead({ pr, reviews, isEngineer }).map(
+    ({ login }) => login
+  )
   const result = ({ color, raisedBy = [], floors = [], ...status }) => ({
     color,
-    approved: approvers.length >= needed,
     emergency: false,
     raisedBy,
     floors,
     ...status
   })
 
-  if (movesMergedChanges({ pr, picks })) {
-    return result({
-      color: 'green',
-      state: 'success',
-      description: 'green: moves changes that already merged'
-    })
-  }
-  if (isDependencyUpdate({ pr, files })) {
-    return result({
-      color: 'green',
-      state: 'success',
-      description: 'green: Dependabot dependency update'
-    })
-  }
+  const own = ownColor({ pr, files, picks })
+  if (own) return result({ color: 'green', state: 'success', description: own })
 
   const sha = pr.headSha.slice(0, 7)
   // The approver writes no finding for a minimum color (speckle-atlas#259), so the
@@ -254,14 +256,65 @@ const floorsProblem = ({ text, unread }) => {
   }
 }
 
+const needsReviewLine = (input) => !input.pr.fromFork && !ownColor(input)
+
 // The check reads the floors file from the default branch. A file it cannot read
 // there fails every later PR, so the PR that would merge one fails instead, and the
 // emergency label does not pass it. `headFloors` is set when the PR changes the
 // file: its `text` at the PR's head, or why the check got none (`unread`).
-export const decide = ({ headFloors = null, ...input }) => {
+const gateBeforeLine = ({ headFloors = null, ...input }) => {
   const result = decideFromReviews(input)
   const problem = headFloors && floorsProblem(headFloors)
   return problem
     ? { ...result, state: 'failure', emergency: false, description: problem }
+    : result
+}
+
+// Tracing an earlier commit costs API calls, so `run.mjs` reads the commits only
+// when the line is all that is left to decide.
+export const reviewLineToTrace = (input) => {
+  if (!needsReviewLine(input) || gateBeforeLine(input).state !== 'success') return null
+  const named = reviewedCommit(input.pr.description)
+  return named && !input.pr.headSha.startsWith(named) ? named : null
+}
+
+// The code review line comes last, and the emergency label does not waive it.
+const gate = ({ commits = null, ...input }) => {
+  const result = gateBeforeLine(input)
+  const problem =
+    result.state === 'success' &&
+    needsReviewLine(input) &&
+    reviewLineProblem({ pr: input.pr, commits })
+  return problem
+    ? { ...result, state: 'failure', emergency: false, description: problem }
+    : result
+}
+
+// GitHub counts an approval from any account with write access, so a merge it let
+// through can still owe the review. `merge.requiredApprovals` is the count the
+// rules of the base branch ask for, or null when the check could not read them.
+const afterMerge = ({ pr, reviews, writers, config, merge, result }) => {
+  const isEngineer = engineerIn({ writers, config })
+  const count = approvalsOfHead({ pr, reviews, isEngineer }).filter(
+    (review) => !review.isBot
+  ).length
+  const required = merge.requiredApprovals
+  const forColor = result.color === 'red' ? neededApprovals({ pr, isEngineer }) : 1
+  return {
+    owes:
+      result.state !== 'success' ||
+      result.emergency ||
+      required === null ||
+      count < required,
+    reviewed: required !== null && count >= Math.max(required, forColor)
+  }
+}
+
+// `merge` is set for a merged PR only: `afterMerge.owes` asks for the label
+// review-after-merge at the merge, and `afterMerge.reviewed` removes it later.
+export const decide = ({ merge, ...input }) => {
+  const result = gate(input)
+  return merge
+    ? { ...result, afterMerge: afterMerge({ ...input, merge, result }) }
     : result
 }

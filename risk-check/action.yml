@@ -13,6 +13,12 @@ inputs:
 runs:
   using: composite
   steps:
+    # The step of the reusable workflow that records a failed run runs
+    # failed-run.mjs from here. The value is the runner's path of this action, not
+    # input from a pull request.
+    - name: Share the path of the action
+      shell: bash
+      run: echo "RISK_CHECK_PATH=${GITHUB_ACTION_PATH}" >> "$GITHUB_ENV" # zizmor: ignore[github-env]
     - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
       with:
         node-version: 22

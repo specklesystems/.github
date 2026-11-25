@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
-import { HEAD, OLD, approval, colorReview, files, pr, run } from './builders.mjs'
+import {
+  HEAD,
+  OLD,
+  approval,
+  colorReview,
+  commit,
+  files,
+  merge,
+  pr,
+  run
+} from './builders.mjs'
 import { floorFor, globToRegExp, parseConfig } from './decide.mjs'
 
 const repoConfig = parseConfig(
@@ -110,7 +120,6 @@ describe('a red PR', () => {
   it('passes on an approval of the head from another engineer', () => {
     const result = run({ reviews: [colorReview('red'), approval('bob')] })
     assert.equal(result.state, 'success')
-    assert.equal(result.approved, true)
   })
 
   it('fails again once that approval is dismissed', () => {
@@ -171,22 +180,13 @@ describe('a red PR', () => {
     assert.equal(result.state, 'failure')
   })
 
-  it('passes with the emergency label and stays unapproved', () => {
+  it('passes with the emergency label', () => {
     const result = run({
       pr: pr({ labels: ['emergency'] }),
       reviews: [colorReview('red')]
     })
     assert.equal(result.state, 'success')
     assert.equal(result.emergency, true)
-    assert.equal(result.approved, false)
-  })
-
-  it('stays unapproved when its author later posts a lower color', () => {
-    const result = run({
-      pr: pr({ labels: ['emergency'] }),
-      reviews: [colorReview('red'), colorReview('green')]
-    })
-    assert.equal(result.approved, false)
   })
 })
 
@@ -323,4 +323,265 @@ describe('the floors file format', () => {
       assert.equal(globToRegExp(glob).test(path), expected)
     })
   }
+})
+
+describe('the code review line', () => {
+  const head7 = HEAD.slice(0, 7)
+  const EARLIER = '1234567890abcdef1234567890abcdef12345678'
+  const BASE_TIP = '9999999999999999999999999999999999999999'
+  const FEATURE = '8888888888888888888888888888888888888888'
+  const described = (description, overrides = {}) => pr({ description, ...overrides })
+  const green = [colorReview('green')]
+  const missing = `The description must end with "Reviewed at ${head7}" (the pr skill writes it)`
+  const old = (named) =>
+    `The description ends with "Reviewed at ${named}"; the newest commit is ${head7}. ` +
+    `Review it, then end with "Reviewed at ${head7}"`
+
+  it('fails a PR that would pass when the description has none', () => {
+    const result = run({ pr: described('Summary.'), reviews: green })
+    assert.equal(result.state, 'failure')
+    assert.equal(result.color, 'green')
+    assert.equal(result.description, missing)
+  })
+
+  it('fails when the line is not the last line', () => {
+    const result = run({
+      pr: described(`Reviewed at ${head7}\n\nOne more thing.`),
+      reviews: green
+    })
+    assert.equal(result.description, missing)
+  })
+
+  it('fails when the line names a commit that is not one of the PR', () => {
+    const result = run({
+      pr: described(`Reviewed at ${OLD}`),
+      reviews: green,
+      commits: [commit(HEAD, [EARLIER, false])]
+    })
+    assert.equal(result.state, 'failure')
+    assert.equal(result.description, old('fffffff'))
+  })
+
+  it('passes on the newest commit, with backticks, a full sha and blank lines around it', () => {
+    for (const line of [`Reviewed at \`${head7}\``, `  Reviewed at ${HEAD}  `]) {
+      const result = run({
+        pr: described(`Summary.\r\n\r\n${line}\r\n\n`),
+        reviews: green
+      })
+      assert.equal(result.state, 'success', line)
+    }
+  })
+
+  it('passes on an earlier commit when only merges from the base branch follow it', () => {
+    const result = run({
+      pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+      reviews: green,
+      commits: [
+        commit(EARLIER, [OLD, true]),
+        commit(FEATURE, [EARLIER, false], [BASE_TIP, true]),
+        commit(HEAD, [FEATURE, false], [BASE_TIP, true])
+      ]
+    })
+    assert.equal(result.state, 'success')
+  })
+
+  it('fails on an earlier commit when a merge of another branch follows it', () => {
+    const result = run({
+      pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+      reviews: green,
+      commits: [
+        commit(EARLIER, [OLD, true]),
+        commit(HEAD, [EARLIER, false], [FEATURE, false])
+      ]
+    })
+    assert.equal(result.description, old('1234567'))
+  })
+
+  it('fails on an earlier commit when an ordinary commit follows it', () => {
+    const result = run({
+      pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+      reviews: green,
+      commits: [commit(EARLIER, [OLD, true]), commit(HEAD, [EARLIER, false])]
+    })
+    assert.equal(result.state, 'failure')
+  })
+
+  it('fails on the last listed commit when it is not the head', () => {
+    const result = run({
+      pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+      reviews: green,
+      commits: [commit(OLD, [BASE_TIP, true]), commit(EARLIER, [OLD, false])]
+    })
+    assert.equal(result.description, old('1234567'))
+  })
+
+  it('fails on an earlier commit with more than 20 merges from the base branch after it', () => {
+    const later = (count) =>
+      Array.from({ length: count }, (_, index) =>
+        commit(
+          index === count - 1 ? HEAD : `${index}`.padStart(40, '7'),
+          [EARLIER, false],
+          [BASE_TIP, true]
+        )
+      )
+    const traced = (count) =>
+      run({
+        pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+        reviews: green,
+        commits: [commit(EARLIER, [OLD, true]), ...later(count)]
+      })
+    assert.equal(traced(20).state, 'success')
+    assert.equal(traced(21).description, old('1234567'))
+  })
+
+  it('fails on an earlier commit when the check got no list of commits', () => {
+    const result = run({
+      pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+      reviews: green
+    })
+    assert.equal(result.description, old('1234567'))
+  })
+
+  it('is not waived by the emergency label', () => {
+    const result = run({
+      pr: described('Summary.', { labels: ['emergency'] }),
+      reviews: [colorReview('red')]
+    })
+    assert.equal(result.state, 'failure')
+    assert.equal(result.emergency, false)
+    assert.equal(result.description, missing)
+  })
+
+  it('comes after the other failures', () => {
+    const noColor = run({ pr: described('Summary.') })
+    assert.match(noColor.description, /^No approver color/)
+    const brokenFloors = run({
+      pr: described('Summary.'),
+      files: files('.github/risk-floors.yml'),
+      reviews: [colorReview('red'), approval('bob')],
+      headFloors: { text: 'nope\n' }
+    })
+    assert.match(brokenFloors.description, /^This PR breaks the floors file/)
+  })
+
+  it('is not needed on a PR from a fork', () => {
+    const result = run({
+      pr: described('Summary.', { authorLogin: 'mallory', fromFork: true }),
+      reviews: [approval('bob')]
+    })
+    assert.equal(result.state, 'success')
+  })
+
+  it('is not needed on a Dependabot dependency update', () => {
+    const result = run({
+      pr: described('Bumps x.', { authorLogin: 'dependabot[bot]', authorIsBot: true }),
+      files: files('package.json')
+    })
+    assert.equal(result.state, 'success')
+  })
+
+  it('is not needed on a hotfix PR of exact copies', () => {
+    const file = { path: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b' }
+    const result = run({
+      pr: described('Hotfix.', { baseRef: 'hotfix-1', headRef: 'alice/pick' }),
+      picks: [{ sourceGated: true, copy: [file], source: [file] }]
+    })
+    assert.equal(result.state, 'success')
+  })
+})
+
+describe('after the merge', () => {
+  const green = colorReview('green')
+  const merged = (input) =>
+    run({ reviews: [green], merge: merge(), ...input }).afterMerge
+
+  it('owes a review when the branch requires an approval and the PR has none', () => {
+    assert.deepEqual(merged({}), { owes: true, reviewed: false })
+  })
+
+  it('owes none with an approval of the head from another engineer', () => {
+    const result = merged({ reviews: [green, approval('bob')] })
+    assert.deepEqual(result, { owes: false, reviewed: true })
+  })
+
+  const notCounted = [
+    ['the author', [approval('alice')]],
+    ['an account GitHub calls a bot', [approval('bob', { isBot: true })]],
+    ['a machine account in the floors file', [approval('SpeckleDevBot')]],
+    ['an account without write access', [approval('mallory')]],
+    ['an earlier commit', [approval('bob', { commitId: OLD })]],
+    [
+      'a reviewer who later requested changes',
+      [approval('bob'), approval('bob', { state: 'CHANGES_REQUESTED' })]
+    ],
+    ['a dismissed approval', [approval('bob'), approval('bob', { state: 'DISMISSED' })]]
+  ]
+  for (const [who, reviews] of notCounted) {
+    it(`does not count an approval from ${who}`, () => {
+      const result = merged({ reviews: [green, ...reviews] })
+      assert.deepEqual(result, { owes: true, reviewed: false })
+    })
+  }
+
+  it('owes a review when the branch requires two approvals and the PR has one', () => {
+    const result = merged({
+      reviews: [green, approval('bob')],
+      merge: merge({ requiredApprovals: 2 })
+    })
+    assert.equal(result.owes, true)
+  })
+
+  it('owes none on a branch that requires no approval', () => {
+    const result = merged({ merge: merge({ requiredApprovals: 0 }) })
+    assert.deepEqual(result, { owes: false, reviewed: false })
+  })
+
+  it('owes a review when the evaluation fails or passes on the emergency label', () => {
+    assert.equal(
+      merged({ reviews: [], merge: merge({ requiredApprovals: 0 }) }).owes,
+      true
+    )
+    const emergency = merged({
+      pr: pr({ labels: ['emergency'] }),
+      reviews: [colorReview('red')],
+      merge: merge({ requiredApprovals: 0 })
+    })
+    assert.equal(emergency.owes, true)
+  })
+
+  it('owes a review, and settles none, when the check could not read the rules of the branch', () => {
+    const result = merged({
+      reviews: [green, approval('bob')],
+      merge: merge({ requiredApprovals: null })
+    })
+    assert.deepEqual(result, { owes: true, reviewed: false })
+  })
+
+  it('takes no later color review from the author as the review after an emergency', () => {
+    const result = merged({
+      pr: pr({ labels: ['emergency'] }),
+      reviews: [colorReview('red'), colorReview('green')],
+      merge: merge({ requiredApprovals: 0 })
+    })
+    assert.equal(result.reviewed, false)
+  })
+
+  it('settles a review with the count the gate asks for the color', () => {
+    const outsider = pr({ authorLogin: 'mallory' })
+    const green = colorReview('green', { login: 'bob' })
+    assert.deepEqual(merged({ pr: outsider, reviews: [green, approval('bob')] }), {
+      owes: false,
+      reviewed: true
+    })
+    const red = [colorReview('red', { login: 'bob' }), approval('bob')]
+    assert.equal(merged({ pr: outsider, reviews: red }).reviewed, false)
+    assert.equal(
+      merged({ pr: outsider, reviews: [...red, approval('carol')] }).reviewed,
+      true
+    )
+  })
+
+  it('is only worked out for a merged PR', () => {
+    assert.equal(run({ reviews: [green] }).afterMerge, undefined)
+  })
 })
