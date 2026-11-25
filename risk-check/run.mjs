@@ -107,10 +107,14 @@ const loadPicks = async ({ pull }) => {
 
 const floorMarker = (path) => `<!-- risk-floor:${path} -->`
 
-const floorBody = ({ path, color }) =>
-  `${floorMarker(path)}\n**Minimum color ${color}:** \`${path}\` matches \`${FLOORS_FILE}\`` +
-  `${color === 'red' ? ', so another engineer approves the latest commit' : ''}. ` +
-  'Answer this like an approver finding: reply with why the change is safe, then resolve.'
+const floorBody = ({ path, name, color, rule }) => {
+  const match = name === path ? `\`${path}\`` : `\`${path}\` was \`${name}\`, which`
+  return (
+    `${floorMarker(path)}\n**Minimum color ${color}:** ${match} matches \`${rule}\`` +
+    `${color === 'red' ? ', so another engineer approves the latest commit' : ''}. ` +
+    'Answer this like an approver finding: reply with why the change is safe, then resolve.'
+  )
+}
 
 const postFloorComments = async ({ number, headSha, floors }) => {
   if (!floors.length) return
@@ -228,7 +232,16 @@ const evaluate = async ({ action, pull }) => {
     return null
   }
 
-  await postFloorComments({ number, headSha: pr.headSha, floors: result.raisedBy })
+  // A crash lets the workflow pass a PR with the emergency label (failed-run.mjs),
+  // and the label never waives a missing approver color, so a comment that fails
+  // keeps a failing result. A passing result still crashes, so only the emergency
+  // label passes a PR whose floor comments failed.
+  try {
+    await postFloorComments({ number, headSha: pr.headSha, floors: result.floors })
+  } catch (error) {
+    if (result.state !== 'failure') throw error
+    console.error(error.message)
+  }
   for (const color of COLORS) {
     const label = `risk:${color}`
     if (color === result.color && !pr.labels.includes(label))
