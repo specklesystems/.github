@@ -251,7 +251,12 @@ const evaluate = async ({ action, removed, emergencyAtMerge, pull }) => {
 
   if (pull.state === 'closed') {
     if (pull.merged) {
-      await settleMerged({ number, labels: pr.labels, afterMerge: result.afterMerge })
+      await settleMerged({
+        number,
+        labels: pr.labels,
+        removed,
+        afterMerge: result.afterMerge
+      })
     }
     return null
   }

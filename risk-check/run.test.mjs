@@ -737,6 +737,17 @@ describe('a removed review-after-merge label', () => {
     assert.deepEqual(labels, [LABEL])
   })
 
+  // The reason for the label can be gone by then: the emergency label was removed.
+  it('comes back when nothing shows the review owed any more', async (context) => {
+    const { labels } = await run({
+      context,
+      event: unlabeled,
+      pulls: { 3: mergedPull() },
+      routes: [reviewsOf3(greenReview), rulesOfMain([]), pushedBy('alice')]
+    })
+    assert.deepEqual(labels, [LABEL])
+  })
+
   // The check removes the label itself only once that approval is there, so the
   // run that its own removal could start adds nothing back.
   it('stays off once the approval is there', async (context) => {

@@ -62,12 +62,14 @@ export const oweReview = async ({ number, reason }) => {
 }
 
 // One rule on every event of a merged PR, so a run that replaces the run of the
-// merge still records it and a removed label comes back. Only the review takes the
-// label off: removing the emergency label afterwards must not clear the debt.
-export const settleMerged = async ({ number, labels, afterMerge }) => {
-  if (afterMerge.owes && !afterMerge.reviewed && !labels.includes(LABEL)) {
-    await oweReview({ number, reason: afterMerge.reasons.join('; ') })
-  } else if (afterMerge.reviewed && labels.includes(LABEL)) {
-    await removeLabel({ number, label: LABEL })
+// merge still records it. Only the review takes the label off: a person who
+// removes it, or the emergency label, afterwards must not clear the debt.
+export const settleMerged = async ({ number, labels, removed, afterMerge }) => {
+  const present = labels.includes(LABEL)
+  if (afterMerge.reviewed) {
+    if (present) await removeLabel({ number, label: LABEL })
+  } else if (!present && (afterMerge.owes || removed === LABEL)) {
+    const reasons = afterMerge.owes ? afterMerge.reasons : ['removed without the review']
+    await oweReview({ number, reason: reasons.join('; ') })
   }
 }
