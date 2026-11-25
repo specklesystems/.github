@@ -481,43 +481,30 @@ describe('after the merge', () => {
     run({ reviews: [green], merge: merge(), ...input }).afterMerge
 
   it('owes a review when the branch requires an approval and the PR has none', () => {
-    const result = merged({})
-    assert.equal(result.owes, true)
-    assert.equal(result.reviewed, false)
-    assert.match(result.reasons.join(), /needs 1 approval/)
+    assert.deepEqual(merged({}), { owes: true, reviewed: false })
   })
 
   it('owes none with an approval of the head from another engineer', () => {
     const result = merged({ reviews: [green, approval('bob')] })
-    assert.deepEqual(result, { owes: false, reviewed: true, reasons: [] })
+    assert.deepEqual(result, { owes: false, reviewed: true })
   })
 
   const notCounted = [
-    ['the author', [approval('alice')], {}],
-    ['the person who pushed last', [approval('bob')], { pushedBy: ['bob'] }],
-    ['an account GitHub calls a bot', [approval('bob', { isBot: true })], {}],
-    ['a machine account in the floors file', [approval('SpeckleDevBot')], {}],
-    ['an account without write access', [approval('mallory')], {}],
-    ['an earlier commit', [approval('bob', { commitId: OLD })], {}],
+    ['the author', [approval('alice')]],
+    ['an account GitHub calls a bot', [approval('bob', { isBot: true })]],
+    ['a machine account in the floors file', [approval('SpeckleDevBot')]],
+    ['an account without write access', [approval('mallory')]],
+    ['an earlier commit', [approval('bob', { commitId: OLD })]],
     [
       'a reviewer who later requested changes',
-      [approval('bob'), approval('bob', { state: 'CHANGES_REQUESTED' })],
-      {}
+      [approval('bob'), approval('bob', { state: 'CHANGES_REQUESTED' })]
     ],
-    [
-      'a dismissed approval',
-      [approval('bob'), approval('bob', { state: 'DISMISSED' })],
-      {}
-    ]
+    ['a dismissed approval', [approval('bob'), approval('bob', { state: 'DISMISSED' })]]
   ]
-  for (const [who, reviews, mergeOverrides] of notCounted) {
+  for (const [who, reviews] of notCounted) {
     it(`does not count an approval from ${who}`, () => {
-      const result = merged({
-        reviews: [green, ...reviews],
-        merge: merge(mergeOverrides)
-      })
-      assert.equal(result.owes, true)
-      assert.equal(result.reviewed, false)
+      const result = merged({ reviews: [green, ...reviews] })
+      assert.deepEqual(result, { owes: true, reviewed: false })
     })
   }
 
@@ -531,25 +518,7 @@ describe('after the merge', () => {
 
   it('owes none on a branch that requires no approval', () => {
     const result = merged({ merge: merge({ requiredApprovals: 0 }) })
-    assert.deepEqual(result, { owes: false, reviewed: false, reasons: [] })
-  })
-
-  it('owes a review for every merge with the emergency label and no approval, whatever the evaluation', () => {
-    const result = merged({
-      pr: pr({ labels: ['emergency'] }),
-      merge: merge({ requiredApprovals: 0 })
-    })
-    assert.equal(result.owes, true)
-    assert.match(result.reasons.join(), /emergency/)
-  })
-
-  it('owes none for an emergency merge with one approval on a branch that requires none', () => {
-    const result = merged({
-      pr: pr({ labels: ['emergency'] }),
-      reviews: [green, approval('bob')],
-      merge: merge({ requiredApprovals: 0 })
-    })
-    assert.equal(result.owes, false)
+    assert.deepEqual(result, { owes: false, reviewed: false })
   })
 
   it('owes a review when the evaluation fails or passes on the emergency label', () => {
@@ -568,11 +537,9 @@ describe('after the merge', () => {
   it('owes a review, and settles none, when the check could not read the rules of the branch', () => {
     const result = merged({
       reviews: [green, approval('bob')],
-      merge: { unread: 'the rules of main (HTTP 502)', pushedBy: [] }
+      merge: merge({ requiredApprovals: null })
     })
-    assert.equal(result.owes, true)
-    assert.equal(result.reviewed, false)
-    assert.match(result.reasons.join(), /HTTP 502/)
+    assert.deepEqual(result, { owes: true, reviewed: false })
   })
 
   it('takes no later color review from the author as the review after an emergency', () => {
@@ -584,13 +551,12 @@ describe('after the merge', () => {
     assert.equal(result.reviewed, false)
   })
 
-  it('settles a review with the count whose absence owed it', () => {
+  it('settles a review with the count the gate asks for the color', () => {
     const outsider = pr({ authorLogin: 'mallory' })
     const green = colorReview('green', { login: 'bob' })
     assert.deepEqual(merged({ pr: outsider, reviews: [green, approval('bob')] }), {
       owes: false,
-      reviewed: true,
-      reasons: []
+      reviewed: true
     })
     const red = [colorReview('red', { login: 'bob' }), approval('bob')]
     assert.equal(merged({ pr: outsider, reviews: red }).reviewed, false)
@@ -598,37 +564,6 @@ describe('after the merge', () => {
       merged({ pr: outsider, reviews: [...red, approval('carol')] }).reviewed,
       true
     )
-  })
-
-  it('owes nothing for a red PR that passes the gate, and settles one with two approvals not from the pusher', () => {
-    const outsider = pr({ authorLogin: 'mallory' })
-    const red = [
-      colorReview('red', { login: 'bob' }),
-      approval('bob'),
-      approval('carol')
-    ]
-    const pushedByCarol = merge({ pushedBy: ['carol'] })
-    assert.equal(run({ pr: outsider, reviews: red }).state, 'success')
-    const result = merged({ pr: outsider, reviews: red, merge: pushedByCarol })
-    assert.deepEqual(result, { owes: false, reviewed: false, reasons: [] })
-    const third = merged({
-      pr: outsider,
-      reviews: [...red, approval('alice')],
-      merge: pushedByCarol
-    })
-    assert.deepEqual(third, { owes: false, reviewed: true, reasons: [] })
-  })
-
-  it('names the count when an emergency merge had fewer approvals than its branch needs', () => {
-    const result = merged({
-      pr: pr({ labels: ['emergency'] }),
-      reviews: [green, approval('bob')],
-      merge: merge({ requiredApprovals: 2 })
-    })
-    assert.equal(result.owes, true)
-    assert.deepEqual(result.reasons, [
-      'main needs 2 approvals of the head commit; it had 1'
-    ])
   })
 
   it('is only worked out for a merged PR', () => {

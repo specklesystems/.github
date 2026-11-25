@@ -274,38 +274,23 @@ const gate = ({ commits = null, ...input }) => {
     : result
 }
 
-// GitHub counts an approval from any account with write access, a machine account
-// and the person who pushed last included, so a merge it let through can still owe
-// the review that the rules of its branch ask for. `merge` holds the approvals
-// those rules require (`requiredApprovals`), or why the check could not read them
-// (`unread`), and who pushed the head (`pushedBy`).
+// GitHub counts an approval from any account with write access, so a merge it let
+// through can still owe the review. `merge.requiredApprovals` is the count the
+// rules of the base branch ask for, or null when the check could not read them.
 const afterMerge = ({ pr, reviews, writers, config, merge, result }) => {
   const isEngineer = engineerIn({ writers, config })
   const count = approvalsOfHead({ pr, reviews, isEngineer }).filter(
-    (review) => !review.isBot && !merge.pushedBy.includes(review.login)
+    (review) => !review.isBot
   ).length
-  const required = merge.unread ? 0 : merge.requiredApprovals
-  const plural = (n) => `${n} approval${n === 1 ? '' : 's'}`
-  const passed = result.state === 'success' && !result.emergency
-  // The approval that settles a red change, or one that got past the gate, is
-  // the count the gate asks of a red change, without the person who pushed last.
-  const strict = !passed || result.color === 'red'
-  const ownRule = neededApprovals({ pr, isEngineer })
-  const reasons = [
-    result.state !== 'success' && `the check did not pass: ${result.description}`,
-    result.emergency && 'it passed on the emergency label',
-    merge.unread && `the check could not read ${merge.unread}`,
-    count < required &&
-      `${pr.baseRef} needs ${plural(required)} of the head commit; it had ${count}`,
-    pr.labels.includes('emergency') &&
-      count === 0 &&
-      'it merged with the emergency label and no approval'
-  ].filter(Boolean)
-  const needed = Math.max(required, strict ? ownRule : 1)
+  const required = merge.requiredApprovals
+  const forColor = result.color === 'red' ? neededApprovals({ pr, isEngineer }) : 1
   return {
-    owes: reasons.length > 0,
-    reviewed: !merge.unread && count >= needed,
-    reasons
+    owes:
+      result.state !== 'success' ||
+      result.emergency ||
+      required === null ||
+      count < required,
+    reviewed: required !== null && count >= Math.max(required, forColor)
   }
 }
 

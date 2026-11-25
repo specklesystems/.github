@@ -29,11 +29,7 @@ export const commit = (sha, ...parents) => ({
   parents: parents.map(([parentSha, onBase]) => ({ sha: parentSha, onBase }))
 })
 
-export const merge = (overrides = {}) => ({
-  requiredApprovals: 1,
-  pushedBy: ['alice'],
-  ...overrides
-})
+export const merge = (overrides = {}) => ({ requiredApprovals: 1, ...overrides })
 
 export const colorReview = (color, overrides = {}) => ({
   login: 'alice',
