@@ -56,7 +56,7 @@ jobs:
             echo "${head} is already ${existing}."
             exit 0
           fi
-          top=$(jq -c '[.[] | (.ref | capture("^refs/tags/1\\.(?<n>[0-9]+)\\.0$")?.n | tonumber) as $n
+          top=$(jq -c '[.[] | (.ref | capture("^refs/tags/1\\.(?<n>[0-9]+)\\.0$")? | .n | tonumber) as $n
                         | {n: $n, sha: .object.sha}] | max_by(.n) // {n: 0, sha: ""}' <<<"${refs}")
           n=$(jq -r .n <<<"${top}")
           top_sha=$(jq -r .sha <<<"${top}")
