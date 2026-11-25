@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { COLORS, decide, parseConfig } from './decide.mjs'
+import { COLORS, decide, parseConfig, reviewLineToTrace } from './decide.mjs'
 import {
   addLabel,
   api,
@@ -8,6 +8,7 @@ import {
   setStatus,
   unless404
 } from './github.mjs'
+import { loadMerge, settleMerged } from './merged.mjs'
 import { isGated, pickedFrom } from './moved.mjs'
 
 const FLOORS_FILE = '.github/risk-floors.yml'
@@ -151,16 +152,33 @@ const otherPullsWithHead = async ({ pull }) =>
     )
     .map(({ number }) => number)
 
-// A PR that merged while the check did not pass got past the gate, because the
-// ruleset did not require risk-check then. A PR that passed on the emergency label
-// merged without its approval. Both owe a review after the merge.
-const settleMerged = async ({ action, number, labels, result }) => {
-  const owes = result.state !== 'success' || result.emergency
-  if (action === 'closed' && owes) {
-    await addLabel({ number, label: 'review-after-merge' })
-  } else if (labels.includes('review-after-merge') && result.approved) {
-    await removeLabel({ number, label: 'review-after-merge' })
+const isOnBase = async ({ base, sha }) => {
+  const comparison = await api({
+    path: `/compare/${encodeURIComponent(base)}...${sha}`
+  }).catch(unlessMissing(null))
+  return comparison?.ahead_by === 0
+}
+
+// GitHub lists at most 250 commits of a PR, so a line that names an older one
+// fails. The check compares one parent at a time, and stops at the first commit
+// after the named one that is no merge of the base branch.
+const loadCommits = async ({ pull, named }) => {
+  const commits = (await paginate({ path: `/pulls/${pull.number}/commits` })).map(
+    ({ sha, parents }) => ({
+      sha,
+      parents: parents.map((parent) => ({ sha: parent.sha, onBase: false }))
+    })
+  )
+  const start = commits.findIndex(({ sha }) => sha.startsWith(named))
+  if (start < 0) return commits
+  for (const { parents } of commits.slice(start + 1)) {
+    for (const parent of parents.slice(1)) {
+      parent.onBase = await isOnBase({ base: pull.base.ref, sha: parent.sha })
+      if (parent.onBase) break
+    }
+    if (!parents.some(({ onBase }) => onBase)) break
   }
+  return commits
 }
 
 // A failed read must not fail the run: the workflow passes a failed run on the
@@ -197,6 +215,7 @@ const evaluate = async ({ action, pull }) => {
     .filter((review) => review.user)
     .map((review) => ({
       login: review.user.login,
+      isBot: review.user.type === 'Bot',
       state: review.state,
       commitId: review.commit_id,
       body: review.body
@@ -210,26 +229,40 @@ const evaluate = async ({ action, pull }) => {
     baseRef,
     headRef: pull.head.ref,
     headGated,
-    fromFork
+    fromFork,
+    description: pull.body ?? ''
   }
+  const changed = files.map(({ filename, previous_filename }) => ({
+    path: filename,
+    previousPath: previous_filename
+  }))
+  const named = reviewLineToTrace({ pr, files: changed, picks })
+  const settling =
+    pull.merged && (action === 'closed' || pr.labels.includes('review-after-merge'))
   const result = decide({
     pr,
-    files: files.map(({ filename, previous_filename }) => ({
-      path: filename,
-      previousPath: previous_filename
-    })),
+    files: changed,
     reviews: reviewList,
     writers: await loadWriters({
       logins: [pr.authorLogin, ...reviewList.map(({ login }) => login)]
     }),
     config,
     headFloors: await loadHeadFloors({ files, headSha: pull.head.sha }),
-    picks
+    picks,
+    commits: named ? await loadCommits({ pull, named }) : null,
+    merge: settling ? await loadMerge({ pull }) : undefined
   })
   console.log(JSON.stringify({ number, headSha: pr.headSha, ...result }, null, 2))
 
   if (pull.state === 'closed') {
-    if (pull.merged) await settleMerged({ action, number, labels: pr.labels, result })
+    if (pull.merged) {
+      await settleMerged({
+        action,
+        number,
+        labels: pr.labels,
+        afterMerge: result.afterMerge
+      })
+    }
     return null
   }
 
@@ -245,18 +278,19 @@ const evaluate = async ({ action, pull }) => {
 }
 
 // A review event runs with a read-only token for a PR from a fork, so the review
-// workflow only starts this one through workflow_run. That event names a head
-// commit and branch, not a PR.
+// workflow only starts this one through workflow_run. That event names no PR, and
+// for a PR from a fork it names the base repo as the head repo
+// (change-gate-sandbox#2), so the PR is found by its head commit. A submitted
+// review updates the PR, which puts it on the first page. Merged PRs stay in the
+// list for their late approval.
 const pullsOf = async ({ event }) => {
   if (event.pull_request) {
     return [await api({ path: `/pulls/${event.pull_request.number}` })]
   }
   const run = event.workflow_run
-  if (!run.head_repository) return []
-  const head = encodeURIComponent(
-    `${run.head_repository.owner.login}:${run.head_branch}`
-  )
-  const pulls = await api({ path: `/pulls?state=all&per_page=100&head=${head}` })
+  const pulls = await api({
+    path: '/pulls?state=all&sort=updated&direction=desc&per_page=100'
+  })
   return Promise.all(
     pulls
       .filter((pull) => pull.head.sha === run.head_sha)

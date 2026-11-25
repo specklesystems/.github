@@ -60,21 +60,16 @@ jobs:
           github-token: ${{ github.token }}
       # A run that fails must not leave an earlier pass mergeable. With the emergency
       # label on a PR from the calling repo, a failed run passes instead: that is how
-      # the PR that repairs a broken risk check merges. The step reads the open PRs
-      # with this head from the API and not from the event: a re-run carries the event
-      # of its first attempt, with labels since removed, and a review event names no
-      # PR. If the lookup fails, it writes the error.
+      # the PR that repairs a broken risk check merges. A PR that changes the floors
+      # file gets no such pass, because it can make the run fail on purpose.
+      # failed-run.mjs reads the open PRs with this head from the API and not from
+      # the event: a re-run carries the event of its first attempt, with labels since
+      # removed, and a review event names no PR. The action set RISK_CHECK_PATH; if
+      # the script does not run or the lookup fails, the step writes the error.
       - name: Record a failed run
         if: failure() && github.event.pull_request.state != 'closed'
-        env:
-          HEAD_LABEL: >-
-            ${{ github.event.pull_request.head.label ||
-            format('{0}:{1}', github.event.workflow_run.head_repository.owner.login,
-            github.event.workflow_run.head_branch) }}
         run: |
-          EMERGENCY=$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" \
-            -f state=open -f per_page=100 -f head="$HEAD_LABEL" \
-            --jq '[.[] | select(.head.sha == env.HEAD_SHA)] | length > 0 and all(.[]; .head.repo.full_name == env.GITHUB_REPOSITORY and any(.labels[]; .name == "emergency"))') || EMERGENCY=false
+          EMERGENCY=$(node "$RISK_CHECK_PATH/failed-run.mjs") || EMERGENCY=false
           if [ "$EMERGENCY" = true ]; then
             state=success
             description='emergency label: the risk check failed to run; review after the merge'

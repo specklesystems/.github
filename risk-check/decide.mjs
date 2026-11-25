@@ -1,4 +1,5 @@
 import { movesMergedChanges } from './moved.mjs'
+import { reviewLineProblem, reviewedCommit } from './review-line.mjs'
 
 export const COLORS = ['green', 'yellow', 'red']
 
@@ -104,22 +105,28 @@ const latestApproverColor = ({ pr, reviews, isEngineer }) => {
   return colors.at(-1) ?? null
 }
 
-const approversOfHead = ({ pr, reviews, isEngineer }) => {
+const engineerIn =
+  ({ writers, config }) =>
+  (login) =>
+    writers.has(login) && !login.endsWith('[bot]') && !config.bots.includes(login)
+
+const neededApprovals = ({ pr, isEngineer }) =>
+  pr.authorIsBot || !isEngineer(pr.authorLogin) ? 2 : 1
+
+const approvalsOfHead = ({ pr, reviews, isEngineer }) => {
   const latestByReviewer = new Map()
   for (const review of reviews) {
     if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)) {
       latestByReviewer.set(review.login, review)
     }
   }
-  return [...latestByReviewer.values()]
-    .filter(
-      (review) =>
-        review.state === 'APPROVED' &&
-        review.commitId === pr.headSha &&
-        review.login !== pr.authorLogin &&
-        isEngineer(review.login)
-    )
-    .map((review) => review.login)
+  return [...latestByReviewer.values()].filter(
+    (review) =>
+      review.state === 'APPROVED' &&
+      review.commitId === pr.headSha &&
+      review.login !== pr.authorLogin &&
+      isEngineer(review.login)
+  )
 }
 
 // The emergency label does nothing on a PR from a fork: an engineer who needs the
@@ -146,35 +153,30 @@ const redStatus = ({ pr, approvers, needed }) => {
   }
 }
 
-// `approved` says whether engineers other than the author approved the head, whatever
-// the color, so a later color review cannot settle a review owed after an emergency.
-const decideFromReviews = ({ pr, files, reviews, writers, config, picks = [] }) => {
-  const isEngineer = (login) =>
-    writers.has(login) && !login.endsWith('[bot]') && !config.bots.includes(login)
-  const needed = pr.authorIsBot || !isEngineer(pr.authorLogin) ? 2 : 1
-  const approvers = approversOfHead({ pr, reviews, isEngineer })
+// The check colors these PRs itself, so they need no approver color and no code
+// review line.
+const ownColor = ({ pr, files, picks = [] }) => {
+  if (movesMergedChanges({ pr, picks }))
+    return 'green: moves changes that already merged'
+  if (isDependencyUpdate({ pr, files })) return 'green: Dependabot dependency update'
+  return null
+}
+
+const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
+  const isEngineer = engineerIn({ writers, config })
+  const needed = neededApprovals({ pr, isEngineer })
+  const approvers = approvalsOfHead({ pr, reviews, isEngineer }).map(
+    ({ login }) => login
+  )
   const result = ({ color, raisedBy = [], ...status }) => ({
     color,
-    approved: approvers.length >= needed,
     emergency: false,
     raisedBy,
     ...status
   })
 
-  if (movesMergedChanges({ pr, picks })) {
-    return result({
-      color: 'green',
-      state: 'success',
-      description: 'green: moves changes that already merged'
-    })
-  }
-  if (isDependencyUpdate({ pr, files })) {
-    return result({
-      color: 'green',
-      state: 'success',
-      description: 'green: Dependabot dependency update'
-    })
-  }
+  const own = ownColor({ pr, files, picks })
+  if (own) return result({ color: 'green', state: 'success', description: own })
 
   const sha = pr.headSha.slice(0, 7)
   const approverColor = latestApproverColor({ pr, reviews, isEngineer })
@@ -238,14 +240,68 @@ const floorsProblem = ({ text, unread }) => {
   }
 }
 
+const needsReviewLine = (input) => !input.pr.fromFork && !ownColor(input)
+
+// The commit that `run.mjs` reads the commits of the PR for: the one an earlier
+// code review line names. Null when the check needs no commit list to decide.
+export const reviewLineToTrace = (input) => {
+  if (!needsReviewLine(input)) return null
+  const named = reviewedCommit(input.pr.description)
+  return named && !input.pr.headSha.startsWith(named) ? named : null
+}
+
 // The check reads the floors file from the default branch. A file it cannot read
 // there fails every later PR, so the PR that would merge one fails instead, and the
 // emergency label does not pass it. `headFloors` is set when the PR changes the
 // file: its `text` at the PR's head, or why the check got none (`unread`).
-export const decide = ({ headFloors = null, ...input }) => {
+// The code review line comes last, and the emergency label does not waive it.
+const gate = ({ headFloors = null, commits = null, ...input }) => {
   const result = decideFromReviews(input)
-  const problem = headFloors && floorsProblem(headFloors)
+  const problem =
+    (headFloors && floorsProblem(headFloors)) ||
+    (result.state === 'success' &&
+      needsReviewLine(input) &&
+      reviewLineProblem({ pr: input.pr, commits }))
   return problem
     ? { ...result, state: 'failure', emergency: false, description: problem }
+    : result
+}
+
+// GitHub counts an approval from any account with write access, a machine account
+// and the person who pushed last included, so a merge it let through can still owe
+// the review that the rules of its branch ask for. `merge` holds the approvals
+// those rules require (`requiredApprovals`), or why the check could not read them
+// (`unread`), and who pushed the head (`pushedBy`).
+const afterMerge = ({ pr, reviews, writers, config, merge, result }) => {
+  const isEngineer = engineerIn({ writers, config })
+  const count = approvalsOfHead({ pr, reviews, isEngineer }).filter(
+    (review) => !review.isBot && !merge.pushedBy.includes(review.login)
+  ).length
+  const required = merge.unread ? 0 : merge.requiredApprovals
+  const plural = (n) => `${n} approval${n === 1 ? '' : 's'}`
+  const reasons = [
+    result.state !== 'success' && `the check did not pass: ${result.description}`,
+    result.emergency && 'it passed on the emergency label',
+    merge.unread && `the check could not read ${merge.unread}`,
+    count < required &&
+      `${pr.baseRef} needs ${plural(required)} of the head commit; it had ${count}`,
+    pr.labels.includes('emergency') &&
+      count < Math.max(required, 1) &&
+      'it merged with the emergency label and no approval'
+  ].filter(Boolean)
+  const needed = Math.max(required, neededApprovals({ pr, isEngineer }))
+  return {
+    owes: reasons.length > 0,
+    reviewed: !merge.unread && count >= needed,
+    reasons
+  }
+}
+
+// `merge` is set for a merged PR only: `afterMerge.owes` asks for the label
+// review-after-merge at the merge, and `afterMerge.reviewed` removes it later.
+export const decide = ({ merge, ...input }) => {
+  const result = gate(input)
+  return merge
+    ? { ...result, afterMerge: afterMerge({ ...input, merge, result }) }
     : result
 }
