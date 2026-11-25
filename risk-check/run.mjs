@@ -6,21 +6,18 @@ import {
   paginate,
   removeLabel,
   setStatus,
-  unless404
+  unless404,
+  unlessMissing
 } from './github.mjs'
-import { loadMerge, settleMerged } from './merged.mjs'
+import { LABEL, loadMerge, oweReview, settleMerged } from './merged.mjs'
 import { isGated, pickedFrom } from './moved.mjs'
+import { loadCommits } from './review-commits.mjs'
 
 const FLOORS_FILE = '.github/risk-floors.yml'
 const WRITE_PERMISSIONS = new Set(['admin', 'write'])
 const COMMIT_FILES_PAGE = 300
 const MAX_PICKS = 20
-
-// GitHub answers 422 for a commit sha it does not know.
-const unlessMissing = (fallback) => (error) => {
-  if ([404, 422].includes(error.status)) return fallback
-  throw error
-}
+const MAX_LIST_PAGES = 10
 
 const loadConfig = async ({ defaultBranch }) =>
   parseConfig(
@@ -152,35 +149,6 @@ const otherPullsWithHead = async ({ pull }) =>
     )
     .map(({ number }) => number)
 
-const isOnBase = async ({ base, sha }) => {
-  const comparison = await api({
-    path: `/compare/${encodeURIComponent(base)}...${sha}`
-  }).catch(unlessMissing(null))
-  return comparison?.ahead_by === 0
-}
-
-// GitHub lists at most 250 commits of a PR, so a line that names an older one
-// fails. The check compares one parent at a time, and stops at the first commit
-// after the named one that is no merge of the base branch.
-const loadCommits = async ({ pull, named }) => {
-  const commits = (await paginate({ path: `/pulls/${pull.number}/commits` })).map(
-    ({ sha, parents }) => ({
-      sha,
-      parents: parents.map((parent) => ({ sha: parent.sha, onBase: false }))
-    })
-  )
-  const start = commits.findIndex(({ sha }) => sha.startsWith(named))
-  if (start < 0) return commits
-  for (const { parents } of commits.slice(start + 1)) {
-    for (const parent of parents.slice(1)) {
-      parent.onBase = await isOnBase({ base: pull.base.ref, sha: parent.sha })
-      if (parent.onBase) break
-    }
-    if (!parents.some(({ onBase }) => onBase)) break
-  }
-  return commits
-}
-
 // A failed read must not fail the run: the workflow passes a failed run on the
 // emergency label, and that would merge a file the check never read (.github#7).
 const loadHeadFloors = async ({ files, headSha }) => {
@@ -194,7 +162,10 @@ const loadHeadFloors = async ({ files, headSha }) => {
   )
 }
 
-const evaluate = async ({ action, pull }) => {
+// On the merge, an evaluation that cannot finish still records the review owed.
+const owesOnFailure = ({ action, pull }) => pull.merged && action === 'closed'
+
+const evaluate = async ({ action, removed, pull }) => {
   const number = pull.number
   const baseRef = pull.base.ref
   const fromFork = pull.head.repo?.full_name !== pull.base.repo.full_name
@@ -206,10 +177,10 @@ const evaluate = async ({ action, pull }) => {
     pull.head.ref === 'dev' ? requiresRiskCheck({ branch: 'dev' }) : false
   ])
   if (files.length < pull.changed_files) {
-    return {
-      state: 'failure',
-      description: `GitHub lists only ${files.length} of the ${pull.changed_files} changed files; split the PR`
-    }
+    const description = `GitHub lists only ${files.length} of the ${pull.changed_files} changed files; split the PR`
+    if (owesOnFailure({ action, pull }))
+      await oweReview({ number, reason: description })
+    return { state: 'failure', description }
   }
   const reviewList = reviews
     .filter((review) => review.user)
@@ -232,32 +203,36 @@ const evaluate = async ({ action, pull }) => {
     fromFork,
     description: pull.body ?? ''
   }
-  const changed = files.map(({ filename, previous_filename }) => ({
-    path: filename,
-    previousPath: previous_filename
-  }))
-  const named = reviewLineToTrace({ pr, files: changed, picks })
-  const settling =
-    pull.merged && (action === 'closed' || pr.labels.includes('review-after-merge'))
-  const result = decide({
+  const input = {
     pr,
-    files: changed,
+    files: files.map(({ filename, previous_filename }) => ({
+      path: filename,
+      previousPath: previous_filename
+    })),
     reviews: reviewList,
     writers: await loadWriters({
       logins: [pr.authorLogin, ...reviewList.map(({ login }) => login)]
     }),
     config,
     headFloors: await loadHeadFloors({ files, headSha: pull.head.sha }),
-    picks,
+    picks
+  }
+  const named = reviewLineToTrace(input)
+  const labelAtStake = removed === LABEL || pr.labels.includes(LABEL)
+  const settling = pull.merged && (action === 'closed' || labelAtStake)
+  const pusherMatters = labelAtStake || pr.labels.includes('emergency')
+  const result = decide({
+    ...input,
     commits: named ? await loadCommits({ pull, named }) : null,
-    merge: settling ? await loadMerge({ pull }) : undefined
+    merge: settling ? await loadMerge({ pull, pusherMatters }) : undefined
   })
   console.log(JSON.stringify({ number, headSha: pr.headSha, ...result }, null, 2))
 
   if (pull.state === 'closed') {
-    if (pull.merged) {
+    if (settling) {
       await settleMerged({
         action,
+        removed,
         number,
         labels: pr.labels,
         afterMerge: result.afterMerge
@@ -281,24 +256,26 @@ const evaluate = async ({ action, pull }) => {
 // workflow only starts this one through workflow_run. That event names no PR, and
 // for a PR from a fork it names the base repo as the head repo
 // (change-gate-sandbox#2), so the PR is found by its head commit. A submitted
-// review updates the PR, which puts it on the first page. Merged PRs stay in the
-// list for their late approval.
+// review updates the PR, which puts it near the top of the list. Merged PRs stay
+// in the list for their late approval.
 const pullsOf = async ({ event }) => {
   if (event.pull_request) {
     return [await api({ path: `/pulls/${event.pull_request.number}` })]
   }
   const run = event.workflow_run
-  const pulls = await api({
-    path: '/pulls?state=all&sort=updated&direction=desc&per_page=100'
-  })
-  return Promise.all(
-    pulls
-      .filter((pull) => pull.head.sha === run.head_sha)
-      .map(({ number }) => api({ path: `/pulls/${number}` }))
-  )
+  for (let page = 1; page <= MAX_LIST_PAGES; page++) {
+    const pulls = await api({
+      path: `/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`
+    })
+    const matches = pulls.filter((pull) => pull.head.sha === run.head_sha)
+    if (matches.length || pulls.length < 100) {
+      return Promise.all(matches.map(({ number }) => api({ path: `/pulls/${number}` })))
+    }
+  }
+  return []
 }
 
-const settle = async ({ action, pull }) => {
+const settle = async ({ action, removed = null, pull }) => {
   const defaultBranch = pull.base.repo.default_branch
   if (!isGated({ baseRef: pull.base.ref, defaultBranch })) return
   const open = pull.state === 'open'
@@ -313,7 +290,15 @@ const settle = async ({ action, pull }) => {
         state: 'failure',
         description: `${headSha.slice(0, 7)} is also the head of ${others.map((n) => `#${n}`).join(', ')}; open one PR per commit`
       }
-    : await evaluate({ action, pull })
+    : await evaluate({ action, removed, pull }).catch(async (error) => {
+        if (owesOnFailure({ action, pull })) {
+          await oweReview({
+            number: pull.number,
+            reason: `the evaluation failed: ${error.message}`
+          })
+        }
+        throw error
+      })
   if (result && open) {
     await setStatus({
       sha: headSha,
@@ -342,6 +327,10 @@ const settleReleased = async ({ event, pull }) => {
 
 const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'))
 for (const pull of await pullsOf({ event })) {
-  await settle({ action: event.action, pull })
+  await settle({
+    action: event.action,
+    removed: event.action === 'unlabeled' ? event.label?.name : null,
+    pull
+  })
   await settleReleased({ event, pull })
 }

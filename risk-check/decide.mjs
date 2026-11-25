@@ -242,26 +242,33 @@ const floorsProblem = ({ text, unread }) => {
 
 const needsReviewLine = (input) => !input.pr.fromFork && !ownColor(input)
 
-// The commit that `run.mjs` reads the commits of the PR for: the one an earlier
-// code review line names. Null when the check needs no commit list to decide.
-export const reviewLineToTrace = (input) => {
-  if (!needsReviewLine(input)) return null
-  const named = reviewedCommit(input.pr.description)
-  return named && !input.pr.headSha.startsWith(named) ? named : null
-}
-
 // The check reads the floors file from the default branch. A file it cannot read
 // there fails every later PR, so the PR that would merge one fails instead, and the
 // emergency label does not pass it. `headFloors` is set when the PR changes the
 // file: its `text` at the PR's head, or why the check got none (`unread`).
-// The code review line comes last, and the emergency label does not waive it.
-const gate = ({ headFloors = null, commits = null, ...input }) => {
+const gateBeforeLine = ({ headFloors = null, ...input }) => {
   const result = decideFromReviews(input)
+  const problem = headFloors && floorsProblem(headFloors)
+  return problem
+    ? { ...result, state: 'failure', emergency: false, description: problem }
+    : result
+}
+
+// Tracing an earlier commit costs API calls, so `run.mjs` reads the commits only
+// when the line is all that is left to decide.
+export const reviewLineToTrace = (input) => {
+  if (!needsReviewLine(input) || gateBeforeLine(input).state !== 'success') return null
+  const named = reviewedCommit(input.pr.description)
+  return named && !input.pr.headSha.startsWith(named) ? named : null
+}
+
+// The code review line comes last, and the emergency label does not waive it.
+const gate = ({ commits = null, ...input }) => {
+  const result = gateBeforeLine(input)
   const problem =
-    (headFloors && floorsProblem(headFloors)) ||
-    (result.state === 'success' &&
-      needsReviewLine(input) &&
-      reviewLineProblem({ pr: input.pr, commits }))
+    result.state === 'success' &&
+    needsReviewLine(input) &&
+    reviewLineProblem({ pr: input.pr, commits })
   return problem
     ? { ...result, state: 'failure', emergency: false, description: problem }
     : result
@@ -286,10 +293,13 @@ const afterMerge = ({ pr, reviews, writers, config, merge, result }) => {
     count < required &&
       `${pr.baseRef} needs ${plural(required)} of the head commit; it had ${count}`,
     pr.labels.includes('emergency') &&
-      count < Math.max(required, 1) &&
+      count === 0 &&
       'it merged with the emergency label and no approval'
   ].filter(Boolean)
-  const needed = Math.max(required, neededApprovals({ pr, isEngineer }))
+  // The review owed is the one whose absence owed it: the evaluation's own count
+  // when the evaluation failed or passed on the emergency label.
+  const passed = result.state === 'success' && !result.emergency
+  const needed = Math.max(required, passed ? 1 : neededApprovals({ pr, isEngineer }))
   return {
     owes: reasons.length > 0,
     reviewed: !merge.unread && count >= needed,

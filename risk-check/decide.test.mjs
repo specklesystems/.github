@@ -12,7 +12,7 @@ import {
   pr,
   run
 } from './builders.mjs'
-import { floorFor, globToRegExp, parseConfig, reviewLineToTrace } from './decide.mjs'
+import { floorFor, globToRegExp, parseConfig } from './decide.mjs'
 
 const repoConfig = parseConfig(
   readFileSync(new URL('./testdata/risk-floors.yml', import.meta.url), 'utf8')
@@ -391,6 +391,34 @@ describe('the code review line', () => {
     assert.equal(result.state, 'failure')
   })
 
+  it('fails on the last listed commit when it is not the head', () => {
+    const result = run({
+      pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+      reviews: green,
+      commits: [commit(OLD, [BASE_TIP, true]), commit(EARLIER, [OLD, false])]
+    })
+    assert.equal(result.description, old('1234567'))
+  })
+
+  it('fails on an earlier commit with more than 20 merges from the base branch after it', () => {
+    const later = (count) =>
+      Array.from({ length: count }, (_, index) =>
+        commit(
+          index === count - 1 ? HEAD : `${index}`.padStart(40, '7'),
+          [EARLIER, false],
+          [BASE_TIP, true]
+        )
+      )
+    const traced = (count) =>
+      run({
+        pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
+        reviews: green,
+        commits: [commit(EARLIER, [OLD, true]), ...later(count)]
+      })
+    assert.equal(traced(20).state, 'success')
+    assert.equal(traced(21).description, old('1234567'))
+  })
+
   it('fails on an earlier commit when the check got no list of commits', () => {
     const result = run({
       pr: described(`Reviewed at ${EARLIER.slice(0, 7)}`),
@@ -444,39 +472,6 @@ describe('the code review line', () => {
       picks: [{ sourceGated: true, copy: [file], source: [file] }]
     })
     assert.equal(result.state, 'success')
-  })
-})
-
-describe('reviewLineToTrace', () => {
-  const EARLIER = '1234567890abcdef1234567890abcdef12345678'
-  const input = (overrides) => ({ files: files('src/a.ts'), picks: [], ...overrides })
-
-  it('names the commit to look up only when the line names an earlier one', () => {
-    assert.equal(
-      reviewLineToTrace(
-        input({ pr: pr({ description: `Reviewed at ${EARLIER.slice(0, 9)}` }) })
-      ),
-      EARLIER.slice(0, 9)
-    )
-    assert.equal(reviewLineToTrace(input({ pr: pr() })), null)
-    assert.equal(reviewLineToTrace(input({ pr: pr({ description: '' }) })), null)
-  })
-
-  it('names none for a PR that needs no line', () => {
-    const description = `Reviewed at ${EARLIER.slice(0, 7)}`
-    assert.equal(
-      reviewLineToTrace(input({ pr: pr({ description, fromFork: true }) })),
-      null
-    )
-    assert.equal(
-      reviewLineToTrace(
-        input({
-          pr: pr({ description, authorLogin: 'dependabot[bot]', authorIsBot: true }),
-          files: files('pnpm-lock.yaml')
-        })
-      ),
-      null
-    )
   })
 })
 
@@ -589,15 +584,32 @@ describe('after the merge', () => {
     assert.equal(result.reviewed, false)
   })
 
-  it('needs two such approvals for a PR from a bot', () => {
-    const botMerge = (reviews) =>
-      merged({
-        pr: pr({ authorLogin: 'github-actions[bot]', authorIsBot: true }),
-        reviews: [colorReview('green', { login: 'bob' }), ...reviews],
-        merge: merge({ pushedBy: ['github-actions[bot]'] })
-      })
-    assert.equal(botMerge([approval('bob')]).reviewed, false)
-    assert.equal(botMerge([approval('bob'), approval('carol')]).reviewed, true)
+  it('settles a review with the count whose absence owed it', () => {
+    const outsider = pr({ authorLogin: 'mallory' })
+    const green = colorReview('green', { login: 'bob' })
+    assert.deepEqual(merged({ pr: outsider, reviews: [green, approval('bob')] }), {
+      owes: false,
+      reviewed: true,
+      reasons: []
+    })
+    const red = [colorReview('red', { login: 'bob' }), approval('bob')]
+    assert.equal(merged({ pr: outsider, reviews: red }).reviewed, false)
+    assert.equal(
+      merged({ pr: outsider, reviews: [...red, approval('carol')] }).reviewed,
+      true
+    )
+  })
+
+  it('names the count when an emergency merge had fewer approvals than its branch needs', () => {
+    const result = merged({
+      pr: pr({ labels: ['emergency'] }),
+      reviews: [green, approval('bob')],
+      merge: merge({ requiredApprovals: 2 })
+    })
+    assert.equal(result.owes, true)
+    assert.deepEqual(result.reasons, [
+      'main needs 2 approvals of the head commit; it had 1'
+    ])
   })
 
   it('is only worked out for a merged PR', () => {

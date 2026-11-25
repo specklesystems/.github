@@ -17,9 +17,11 @@ const pull = ({
   sha = HEAD,
   fork = false,
   labels = ['emergency'],
-  changedFiles = 1
+  changedFiles = 1,
+  body = `Summary.\n\nReviewed at ${HEAD.slice(0, 7)}`
 } = {}) => ({
   number,
+  body,
   changed_files: changedFiles,
   labels: labels.map((name) => ({ name })),
   head: { sha, repo: fork ? { full_name: 'mallory/r' } : repo }
@@ -59,6 +61,12 @@ const run = async ({ pulls, files = {}, context }) => {
 describe('a failed run', () => {
   it('passes a PR from this repo with the emergency label', async (context) => {
     assert.equal(await run({ context, pulls: [pull()] }), 'true')
+  })
+
+  it('passes no PR whose description does not end with "Reviewed at" the head', async (context) => {
+    for (const body of ['Summary.', `Reviewed at ${'b'.repeat(7)}`, null]) {
+      assert.equal(await run({ context, pulls: [pull({ body })] }), 'false', body)
+    }
   })
 
   it('passes no PR without the emergency label', async (context) => {

@@ -60,11 +60,14 @@ const response = ({ value, status = 200 }) => ({
 })
 
 let runs = 0
-// run.mjs works on import, so each case imports it again under a new URL.
-const run = async ({ event, pulls, routes = [], context }) => {
+// run.mjs works on import, so each case imports it again under a new URL. A case
+// that expects the run to fail sets `throws`, and gets the error back.
+const run = async ({ event, pulls, routes = [], context, throws = false }) => {
   const statuses = []
   const requests = []
-  context.mock.method(console, 'log', () => {})
+  const labels = []
+  const logged = []
+  context.mock.method(console, 'log', (line) => logged.push(String(line)))
   context.mock.method(
     globalThis,
     'fetch',
@@ -75,6 +78,9 @@ const run = async ({ event, pulls, routes = [], context }) => {
         const sent = body ? JSON.parse(body) : {}
         if (path.startsWith('/statuses/')) {
           statuses.push(`${path.slice(10, 17)} ${sent.state}: ${sent.description}`)
+        }
+        if (method === 'POST' && /^\/issues\/\d+\/labels$/.test(path)) {
+          labels.push(...sent.labels)
         }
         return response({ value: {} })
       }
@@ -104,8 +110,16 @@ const run = async ({ event, pulls, routes = [], context }) => {
     }
   )
   writeFileSync(eventPath, JSON.stringify(event))
-  await import(`./run.mjs?run=${++runs}`)
-  return { statuses, requests }
+  const imported = import(`./run.mjs?run=${++runs}`)
+  if (!throws) {
+    await imported
+    return { statuses, requests, labels, logged }
+  }
+  const error = await imported.then(
+    () => assert.fail('the run did not fail'),
+    (thrown) => thrown
+  )
+  return { statuses, requests, labels, logged, error }
 }
 
 describe('two open PRs with one head commit', () => {
@@ -260,10 +274,32 @@ describe('a PR that changes the floors file', () => {
   })
 })
 
+const LABEL = 'review-after-merge'
 const standardRules = [
   { type: 'required_status_checks', parameters: { required_status_checks: [] } },
   { type: 'pull_request', parameters: { required_approving_review_count: 1 } }
 ]
+const rulesOfMain = (value, status) => ({
+  match: '/rules/branches/main',
+  value,
+  status
+})
+const reviewsOf3 = (...value) => ({ match: '/pulls/3/reviews', value })
+const pushedBy = (login) => ({
+  match: '/activity?ref=b',
+  value: [
+    {
+      activity_type: 'branch_deletion',
+      after: '0'.repeat(40),
+      actor: { login: 'alice' }
+    },
+    { activity_type: 'push', after: HEAD, actor: { login } }
+  ]
+})
+const headCommit = (value, status) => ({ match: `/commits/${HEAD}`, value, status })
+const failing = (match) => ({ match, value: { message: 'Bad Gateway' }, status: 502 })
+const mergedPull = (overrides = {}) =>
+  pull({ number: 3, state: 'closed', merged: true, ...overrides })
 
 describe('a review run started through workflow_run', () => {
   // GitHub names the base repo as the head repo for a review of a fork PR
@@ -277,7 +313,9 @@ describe('a review run started through workflow_run', () => {
       pull_requests: []
     }
   }
-  const approved = { match: '/pulls/3/reviews', value: [approvalOf('bob')] }
+  const approved = reviewsOf3(approvalOf('bob'))
+  const listPage = (page) =>
+    `/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`
 
   it('finds a PR from a fork by its head commit', async (context) => {
     const { statuses } = await run({
@@ -292,29 +330,41 @@ describe('a review run started through workflow_run', () => {
     ])
   })
 
-  it('removes review-after-merge from a merged PR from a fork on its late approval', async (context) => {
-    const { requests } = await run({
+  it('reads the next page of PRs when the first holds no match', async (context) => {
+    const others = Array.from({ length: 100 }, (_, index) =>
+      pull({ number: 100 + index, sha: NEXT })
+    )
+    const { statuses, requests } = await run({
       context,
       event: reviewRun,
-      pulls: {
-        3: pull({
-          number: 3,
-          fork: true,
-          state: 'closed',
-          merged: true,
-          labels: ['review-after-merge']
-        })
-      },
+      pulls: { 3: pull({ number: 3, fork: true }) },
       routes: [
         approved,
-        { match: '/rules/branches/main', value: standardRules },
-        {
-          match: `/commits/${HEAD}`,
-          value: { author: { login: 'mallory' }, committer: { login: 'mallory' } }
-        }
+        { match: listPage(1), value: others },
+        { match: listPage(2), value: [pull({ number: 3, fork: true })] },
+        { match: '/pulls?state=all', value: others }
       ]
     })
-    assert.ok(requests.includes('DELETE /issues/3/labels/review-after-merge'))
+    assert.equal(
+      statuses.at(-1),
+      'aaaaaaa success: no color: PR from a fork, approved by bob'
+    )
+    assert.ok(!requests.includes(`GET ${listPage(3)}`))
+  })
+
+  it('removes review-after-merge from a merged PR from a fork on its late approval', async (context) => {
+    const { requests, labels } = await run({
+      context,
+      event: reviewRun,
+      pulls: { 3: mergedPull({ fork: true, labels: [LABEL] }) },
+      routes: [
+        approved,
+        rulesOfMain(standardRules),
+        headCommit({ author: { login: 'mallory' }, committer: { login: 'mallory' } })
+      ]
+    })
+    assert.ok(requests.includes(`DELETE /issues/3/labels/${LABEL}`))
+    assert.deepEqual(labels, [])
   })
 
   it('evaluates both PRs that share the head commit', async (context) => {
@@ -334,132 +384,229 @@ describe('a review run started through workflow_run', () => {
 
 describe('a merge', () => {
   const closed = { action: 'closed', pull_request: { number: 3 } }
-  const mergedPull = (overrides = {}) =>
-    pull({ number: 3, state: 'closed', merged: true, ...overrides })
-  const pushedBy = (login) => ({
-    match: '/activity?ref=b',
-    value: [
-      {
-        activity_type: 'branch_deletion',
-        after: '0'.repeat(40),
-        actor: { login: 'alice' }
-      },
-      { activity_type: 'push', after: HEAD, actor: { login } }
-    ]
-  })
-  const labelled = (requests) => requests.includes('POST /issues/3/labels')
+  const merging = async ({ context, routes, pull: merged = mergedPull(), ...rest }) =>
+    run({ context, event: closed, pulls: { 3: merged }, routes, ...rest })
+  const pusherReads = (requests) =>
+    requests.filter((request) => /\/activity|^GET \/commits\//.test(request))
 
   it('without an approval, into a branch that requires one, gets review-after-merge', async (context) => {
-    const { requests } = await run({
+    const { labels } = await merging({
       context,
-      event: closed,
-      pulls: { 3: mergedPull() },
-      routes: [
-        { match: '/rules/branches/main', value: standardRules },
-        pushedBy('alice')
-      ]
+      routes: [rulesOfMain(standardRules), pushedBy('alice')]
     })
-    assert.ok(labelled(requests))
+    assert.deepEqual(labels, [LABEL])
   })
 
   it('with an approval of another engineer gets no label', async (context) => {
-    const { requests } = await run({
+    const { labels } = await merging({
       context,
-      event: closed,
-      pulls: { 3: mergedPull() },
       routes: [
-        { match: '/pulls/3/reviews', value: [greenReview, approvalOf('bob')] },
-        { match: '/rules/branches/main', value: standardRules },
+        reviewsOf3(greenReview, approvalOf('bob')),
+        rulesOfMain(standardRules),
         pushedBy('alice')
       ]
     })
-    assert.ok(!labelled(requests))
+    assert.deepEqual(labels, [])
+  })
+
+  it('takes the highest count of the pull_request rules of the branch', async (context) => {
+    const { labels } = await merging({
+      context,
+      routes: [
+        reviewsOf3(greenReview, approvalOf('bob')),
+        rulesOfMain([
+          ...standardRules,
+          { type: 'pull_request', parameters: { required_approving_review_count: 2 } }
+        ]),
+        pushedBy('alice')
+      ]
+    })
+    assert.deepEqual(labels, [LABEL])
   })
 
   it('approved only by the person who pushed last gets the label', async (context) => {
-    const { requests } = await run({
+    const { labels } = await merging({
       context,
-      event: closed,
-      pulls: { 3: mergedPull() },
       routes: [
-        { match: '/pulls/3/reviews', value: [greenReview, approvalOf('bob')] },
-        { match: '/rules/branches/main', value: standardRules },
+        reviewsOf3(greenReview, approvalOf('bob')),
+        rulesOfMain(standardRules),
         pushedBy('bob')
       ]
     })
-    assert.ok(labelled(requests))
+    assert.deepEqual(labels, [LABEL])
   })
 
   it('takes the head commit author when the push is not in the activity list', async (context) => {
     for (const [author, expected] of [
-      ['bob', true],
-      ['alice', false]
+      ['bob', [LABEL]],
+      ['alice', []]
     ]) {
-      const { requests } = await run({
+      const { labels } = await merging({
         context,
-        event: closed,
-        pulls: { 3: mergedPull() },
         routes: [
-          { match: '/pulls/3/reviews', value: [greenReview, approvalOf('bob')] },
-          { match: '/rules/branches/main', value: standardRules },
+          reviewsOf3(greenReview, approvalOf('bob')),
+          rulesOfMain(standardRules),
           { match: '/activity', value: { message: 'Forbidden' }, status: 403 },
-          {
-            match: `/commits/${HEAD}`,
-            value: { author: { login: author }, committer: { login: 'web-flow' } }
-          }
+          headCommit({ author: { login: author }, committer: { login: 'web-flow' } })
         ]
       })
-      assert.equal(labelled(requests), expected, author)
+      assert.deepEqual(labels, expected, author)
+    }
+  })
+
+  it('gets the label when the check cannot tell who pushed the head commit', async (context) => {
+    for (const commitRoute of [
+      failing(`/commits/${HEAD}`),
+      headCommit({ author: null, committer: null })
+    ]) {
+      const { labels, logged } = await merging({
+        context,
+        routes: [
+          reviewsOf3(greenReview, approvalOf('bob')),
+          rulesOfMain(standardRules),
+          { match: '/activity', value: { message: 'Forbidden' }, status: 403 },
+          commitRoute
+        ]
+      })
+      assert.deepEqual(labels, [LABEL])
+      assert.match(logged.join('\n'), /who pushed the head commit/)
     }
   })
 
   it('gets the label when the check cannot read the rules of the branch', async (context) => {
-    const { requests } = await run({
+    const { labels } = await merging({
       context,
-      event: closed,
-      pulls: { 3: mergedPull() },
       routes: [
-        { match: '/pulls/3/reviews', value: [greenReview, approvalOf('bob')] },
-        {
-          match: '/rules/branches/main',
-          value: { message: 'Bad Gateway' },
-          status: 502
-        },
+        reviewsOf3(greenReview, approvalOf('bob')),
+        failing('/rules/branches/main'),
         pushedBy('alice')
       ]
     })
-    assert.ok(labelled(requests))
+    assert.deepEqual(labels, [LABEL])
   })
 
-  it('into a branch that requires no approval gets no label', async (context) => {
-    const { requests } = await run({
+  it('into a branch that requires no approval gets no label, and reads no pusher', async (context) => {
+    const { labels, requests } = await merging({
       context,
-      event: closed,
-      pulls: { 3: mergedPull() },
       routes: [
-        { match: '/rules/branches/main', value: [standardRules[0]] },
+        rulesOfMain([standardRules[0]]),
+        { match: '/activity', value: { message: 'Forbidden' }, status: 403 },
+        failing(`/commits/${HEAD}`)
+      ]
+    })
+    assert.deepEqual(labels, [])
+    assert.deepEqual(pusherReads(requests), [])
+  })
+
+  it('from an author without write access, approved once, gets no label and settles one later', async (context) => {
+    const routes = [
+      { match: '/collaborators/alice/permission', value: { permission: 'read' } },
+      reviewsOf3({ ...greenReview, user: { login: 'bob' } }, approvalOf('bob')),
+      rulesOfMain(standardRules),
+      pushedBy('alice')
+    ]
+    const atMerge = await merging({ context, routes })
+    assert.deepEqual(atMerge.labels, [])
+    const later = await run({
+      context,
+      event: { action: 'edited', pull_request: { number: 3 } },
+      pulls: { 3: mergedPull({ labels: [LABEL] }) },
+      routes
+    })
+    assert.ok(later.requests.includes(`DELETE /issues/3/labels/${LABEL}`))
+  })
+
+  it('gets the label when GitHub does not list every changed file', async (context) => {
+    const { labels, logged } = await merging({
+      context,
+      pull: { ...mergedPull(), changed_files: 2 },
+      routes: [
+        reviewsOf3(greenReview, approvalOf('bob')),
+        rulesOfMain(standardRules),
         pushedBy('alice')
       ]
     })
-    assert.ok(!labelled(requests))
+    assert.deepEqual(labels, [LABEL])
+    assert.match(logged.join('\n'), /lists only 1 of the 2 changed files/)
+  })
+
+  it('gets the label, and the run fails, when a read fails during the evaluation', async (context) => {
+    const { labels, logged, error } = await merging({
+      context,
+      throws: true,
+      pull: mergedPull({ body: `Reviewed at ${SOURCE.slice(0, 7)}` }),
+      routes: [
+        reviewsOf3(greenReview, approvalOf('bob')),
+        failing('/pulls/3/commits'),
+        rulesOfMain(standardRules),
+        pushedBy('alice')
+      ]
+    })
+    assert.equal(error.status, 502)
+    assert.deepEqual(labels, [LABEL])
+    assert.match(logged.join('\n'), /review-after-merge.*502/s)
+  })
+})
+
+describe('a removed review-after-merge label', () => {
+  const unlabeled = {
+    action: 'unlabeled',
+    label: { name: LABEL },
+    pull_request: { number: 3 }
+  }
+
+  it('comes back while the review is missing', async (context) => {
+    const { labels } = await run({
+      context,
+      event: unlabeled,
+      pulls: { 3: mergedPull() },
+      routes: [rulesOfMain(standardRules), pushedBy('alice')]
+    })
+    assert.deepEqual(labels, [LABEL])
+  })
+
+  // The check removes the label itself only once that approval is there, so the
+  // run that its own removal could start adds nothing back.
+  it('stays off once the approval is there', async (context) => {
+    const { labels, requests } = await run({
+      context,
+      event: unlabeled,
+      pulls: { 3: mergedPull() },
+      routes: [
+        reviewsOf3(greenReview, approvalOf('bob')),
+        rulesOfMain(standardRules),
+        pushedBy('alice')
+      ]
+    })
+    assert.deepEqual(labels, [])
+    assert.ok(!requests.some((request) => request.startsWith('DELETE')))
   })
 })
 
 describe('the code review line', () => {
   const BEFORE = 'd'.repeat(40)
   const BASE_TIP = 'e'.repeat(40)
+  const merges = (count, last = HEAD) =>
+    Array.from({ length: count }, (_, index) => ({
+      sha: index === count - 1 ? last : `${index}`.padStart(40, '1'),
+      parents: [{ sha: BEFORE }, { sha: BASE_TIP }]
+    }))
+  const commitsOf3 = (...later) => ({
+    match: '/pulls/3/commits',
+    value: [{ sha: SOURCE, parents: [{ sha: BEFORE }] }, ...later]
+  })
   const traced = (aheadBy) => [
-    {
-      match: '/pulls/3/commits',
-      value: [
-        { sha: SOURCE, parents: [{ sha: BEFORE }] },
-        { sha: HEAD, parents: [{ sha: SOURCE }, { sha: BASE_TIP }] }
-      ]
-    },
+    commitsOf3(...merges(1)),
     { match: `/compare/main...${BASE_TIP}`, value: { ahead_by: aheadBy } }
   ]
   const opened = { action: 'opened', pull_request: { number: 3 } }
-  const earlier = pull({ number: 3, body: `Reviewed at ${SOURCE.slice(0, 7)}` })
+  const line = `Reviewed at ${SOURCE.slice(0, 7)}`
+  const earlier = pull({ number: 3, body: line })
+  const oldLine =
+    'aaaaaaa failure: The description ends with "Reviewed at ccccccc"; the newest commit is aaaaaaa. ' +
+    'Review it, then end with "Reviewed at aaaaaaa"'
+  const reads = (requests, pattern = /\/commits|\/compare/) =>
+    requests.filter((request) => pattern.test(request))
 
   it('passes on an earlier commit followed by a merge from the base branch', async (context) => {
     const { statuses } = await run({
@@ -478,23 +625,66 @@ describe('the code review line', () => {
       pulls: { 3: earlier },
       routes: traced(2)
     })
-    assert.equal(
-      statuses.at(-1),
-      'aaaaaaa failure: The description ends with "Reviewed at ccccccc"; the newest commit is aaaaaaa. ' +
-        'Review it, then end with "Reviewed at aaaaaaa"'
-    )
+    assert.equal(statuses.at(-1), oldLine)
   })
 
-  it('reads no commit when the line names the head, or for a PR from a fork', async (context) => {
-    for (const pulls of [
-      { 3: pull({ number: 3 }) },
-      { 3: pull({ number: 3, fork: true, body: `Reviewed at ${SOURCE.slice(0, 7)}` }) }
-    ]) {
-      const { requests } = await run({ context, event: opened, pulls })
-      assert.deepEqual(
-        requests.filter((request) => /\/commits|\/compare/.test(request)),
-        []
-      )
+  it('fails, and compares nothing, past 20 commits after the named one', async (context) => {
+    const { statuses, requests } = await run({
+      context,
+      event: opened,
+      pulls: { 3: earlier },
+      routes: [commitsOf3(...merges(21))]
+    })
+    assert.equal(statuses.at(-1), oldLine)
+    assert.deepEqual(reads(requests, /\/compare/), [])
+  })
+
+  it('fails, and compares nothing, when the listed commits do not reach the head', async (context) => {
+    const { statuses, requests } = await run({
+      context,
+      event: opened,
+      pulls: { 3: earlier },
+      routes: [commitsOf3(...merges(1, NEXT))]
+    })
+    assert.equal(statuses.at(-1), oldLine)
+    assert.deepEqual(reads(requests, /\/compare/), [])
+  })
+
+  it('reads no commit when the line names the head, or for a PR that needs no line', async (context) => {
+    const dependabot = {
+      ...pull({ number: 3, body: line }),
+      user: { login: 'dependabot[bot]', type: 'Bot' }
     }
+    for (const [pulls, routes] of [
+      [{ 3: pull({ number: 3 }) }, []],
+      [
+        { 3: pull({ number: 3, fork: true, body: line }) },
+        [reviewsOf3(approvalOf('bob'))]
+      ],
+      [
+        { 3: dependabot },
+        [{ match: '/pulls/3/files', value: [{ filename: 'package.json' }] }]
+      ]
+    ]) {
+      const { statuses, requests } = await run({
+        context,
+        event: opened,
+        pulls,
+        routes
+      })
+      assert.match(statuses.at(-1), /success/)
+      assert.deepEqual(reads(requests), [])
+    }
+  })
+
+  it('reads no commit when the PR fails for another reason', async (context) => {
+    const { statuses, requests } = await run({
+      context,
+      event: opened,
+      pulls: { 3: earlier },
+      routes: [reviewsOf3()]
+    })
+    assert.match(statuses.at(-1), /failure: No approver color/)
+    assert.deepEqual(reads(requests), [])
   })
 })

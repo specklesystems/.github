@@ -1,6 +1,6 @@
 import { addLabel, api, paginate, removeLabel } from './github.mjs'
 
-const LABEL = 'review-after-merge'
+export const LABEL = 'review-after-merge'
 
 const reasonOf = (error) => (error.status ? `HTTP ${error.status}` : 'no response')
 
@@ -33,27 +33,46 @@ const pushedBy = async ({ pull }) => {
 }
 
 // What `decide` needs as `merge`. A read that fails is not guessed: it leaves
-// `unread`, which owes the review and settles none.
-export const loadMerge = async ({ pull }) => {
-  const unread = (what) => (error) => ({
-    unread: `${what} (${reasonOf(error)})`,
-    pushedBy: []
-  })
+// `unread`, which owes the review and settles none. The pusher only counts against
+// a required approval, an emergency or a label at stake, so a risk-based merge
+// that passed reads none and gets no label from it.
+export const loadMerge = async ({ pull, pusherMatters }) => {
+  const unread = (what, reason) => ({ unread: `${what} (${reason})`, pushedBy: [] })
   const rule = await requiredApprovals({ branch: pull.base.ref }).then(
     (count) => ({ requiredApprovals: count }),
-    unread(`the rules of ${pull.base.ref}`)
+    (error) => unread(`the rules of ${pull.base.ref}`, reasonOf(error))
   )
   if (rule.unread) return rule
+  if (!rule.requiredApprovals && !pusherMatters) return { ...rule, pushedBy: [] }
+  const pusher = 'who pushed the head commit'
   return pushedBy({ pull }).then(
-    (logins) => ({ ...rule, pushedBy: logins }),
-    unread('who pushed the head commit')
+    (logins) =>
+      logins.length
+        ? { ...rule, pushedBy: logins }
+        : unread(pusher, 'no login on the head commit'),
+    (error) => unread(pusher, reasonOf(error))
   )
 }
 
-export const settleMerged = async ({ action, number, labels, afterMerge }) => {
-  if (!afterMerge) return
-  if (action === 'closed' && afterMerge.owes) {
-    await addLabel({ number, label: LABEL })
+// A merge that got past the rules must not leave the weekly list because its
+// evaluation could not finish.
+export const oweReview = async ({ number, reason }) => {
+  console.log(`#${number} gets ${LABEL}: ${reason}`)
+  await addLabel({ number, label: LABEL })
+}
+
+// Whoever can triage can remove the label, so it comes back until the review is
+// in. The check removes it only once `reviewed` holds, so its own removal does not
+// bring it back.
+export const settleMerged = async ({ action, removed, number, labels, afterMerge }) => {
+  const owes =
+    (action === 'closed' && afterMerge.owes) ||
+    (removed === LABEL && !afterMerge.reviewed)
+  if (owes) {
+    await oweReview({
+      number,
+      reason: afterMerge.reasons.join('; ') || 'no review yet'
+    })
   } else if (labels.includes(LABEL) && afterMerge.reviewed) {
     await removeLabel({ number, label: LABEL })
   }
