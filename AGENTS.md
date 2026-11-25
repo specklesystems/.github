@@ -25,7 +25,7 @@ by searching the org's workflows for `specklesystems/.github/`.
 2. Dependabot in each caller (`.github/dependabot.yml`, ecosystem
    `github-actions`, group `dot-github`) opens the pin update with the
    compare view on its next daily run, with no cooldown. Outside
-   `speckle-next` it merges only after the workflows it changes passed in
+   `speckle-next` it merges only after the workflows it changes worked in
    `speckle-next` at the new pin. Do not open pin updates by hand, unless a
    fix cannot wait for them, and then pin a tagged commit: Dependabot moves
    an untagged pin to the head of `main`. Rules: ADR-0002 in the atlas,
