@@ -1,6 +1,6 @@
 name: Risk check review (reusable)
 
-# A repo calls this at a pinned commit from a workflow named `Risk check review`, as
+# A repo calls this from `main` in a workflow named `Risk check review`, as
 # risk-check-review-self.yml does here. A review changes the risk-check result, but
 # a review event runs with a read-only token for a PR from a fork. This workflow
 # does nothing itself: the repo's Risk check workflow starts when its caller

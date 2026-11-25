@@ -1,6 +1,6 @@
 name: Risk check (reusable)
 
-# A repo calls this at a pinned commit from a workflow named `Risk check`, as
+# A repo calls this from `main` in a workflow named `Risk check`, as
 # risk-check-self.yml does here. GitHub takes a workflow file for
 # pull_request_target and workflow_run from the default branch of the repo that
 # holds the pull request, so the triggers stay in that repo. The job never checks
@@ -54,7 +54,8 @@ jobs:
             -H 'accept: application/vnd.github+json' \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -d '{"context":"risk-check","state":"pending","description":"Evaluating"}'
-      # The action of this repo at the commit of this file: the caller's pin.
+      # The action of this repo at the commit of this file, so the workflow and
+      # its script always come from one commit.
       - uses: $/risk-check
         with:
           github-token: ${{ github.token }}

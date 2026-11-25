@@ -1,6 +1,6 @@
 name: image-scan (reusable)
 
-# A repo calls this at a pinned commit from a job named `image-scan`, after the
+# A repo calls this from `main` in a job named `image-scan`, after the
 # job that pushes its images, and gives it `permissions: contents: read,
 # packages: read`. No job may need it: findings never fail it, and the weekly
 # findings review of the atlas rates them (ENG-11742). It fails only when an
