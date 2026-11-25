@@ -8,7 +8,8 @@ Shared GitHub workflows and actions that Speckle repos call from `main`, plus th
   (`secret-scan`, `risk-check`, `risk-check-review`, `image-scan`), and
   `risk-check/`, the action behind the risk check. `<name>-test.yml` runs
   one on a pull request here; `<name>-self.yml` runs it on this repo;
-  `callers-test.yml` loads the risk check workflows as callers do.
+  `callers-test.yml` loads the risk check and image scan workflows as
+  callers do.
 - `profile/README.md`: the public org profile page.
 
 The repo is public. Every change needs an `engineering` approval
@@ -23,17 +24,19 @@ workflows for `specklesystems/.github/`. Rules: ADR-0004 in the atlas,
 `atlas/specs/2026-11-change-gate-rollout/adr/0004-callers-run-the-shared-workflows-from-main.md`.
 
 1. No repo tries a change first. `callers-test.yml` makes GitHub load the
-   pull request's risk check workflows with the callers' inputs and
-   permissions, and runs no step: a run that fails there would fail in
-   every caller. It is advisory (ruleset 27554748 requires no status
-   check), so read it before approving. A broken `risk-check/action.yml`
-   or step still reaches every caller; only the unit tests cover the
-   scripts.
-2. Only an org admin can create a tag here (ruleset 27993066), so `main`
+   pull request's risk check and image scan workflows with the callers'
+   inputs, secrets and permissions, and runs no step: a run that fails
+   there would fail in every caller. It is advisory (ruleset 27554748
+   requires no status check), so read it before approving. A broken
+   `risk-check/action.yml` or step still reaches every caller; only the
+   unit tests cover the scripts.
+2. No one can create a tag here (ruleset 27993066, no bypass), so `main`
    names only the branch.
 3. A new caller references `@main`. If it runs zizmor, its
    `.github/zizmor.yml` sets the `unpinned-uses` policy
-   `specklesystems/.github/*: ref-pin`.
+   `specklesystems/.github/*: ref-pin`. zizmor cannot limit that to
+   `@main` (it rejects exact ref patterns there); the caller's own review
+   of `.github/` is the guard.
 
 Inputs, secrets, the permissions a job asks for, job names and artifact
 names are the contract with the callers: a merge must not need a change in
