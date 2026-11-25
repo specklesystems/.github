@@ -376,6 +376,29 @@ describe('a review run started through workflow_run', () => {
     assert.ok(!requests.includes(`GET ${listPage(3)}`))
   })
 
+  it('reads on past an open match on a branch the check does not cover', async (context) => {
+    const others = Array.from({ length: 99 }, (_, index) =>
+      pull({ number: 100 + index, sha: NEXT })
+    )
+    const stacked = pull({ number: 5, baseRef: 'alice/stack' })
+    const { statuses, requests } = await run({
+      context,
+      event: reviewRun,
+      pulls: { 3: pull({ number: 3, fork: true }), 5: stacked },
+      routes: [
+        approved,
+        { match: listPage(1), value: [...others, stacked] },
+        { match: listPage(2), value: [pull({ number: 3, fork: true })] },
+        { match: '/pulls?state=all', value: [...others, stacked] }
+      ]
+    })
+    assert.ok(requests.includes(`GET ${listPage(2)}`))
+    assert.equal(
+      statuses.at(-1),
+      'aaaaaaa success: no color: PR from a fork, approved by bob'
+    )
+  })
+
   it('fails the run, and names the head commit, when 10 full pages hold no match', async (context) => {
     const others = Array.from({ length: 100 }, (_, index) =>
       pull({ number: 100 + index, sha: NEXT })
@@ -613,6 +636,46 @@ describe('a merge', () => {
     assert.deepEqual(labels, [LABEL])
     assert.match(logged.join('\n'), /emergency label and no approval/)
   })
+
+  it('reads the pusher when the gate did not pass, also on a branch that requires no approval', async (context) => {
+    const { labels, requests } = await merging({
+      context,
+      pull: mergedPull({ body: 'Summary.' }),
+      routes: [
+        reviewsOf3(greenReview, approvalOf('bob')),
+        rulesOfMain([standardRules[0]]),
+        pushedBy('bob')
+      ]
+    })
+    assert.ok(requests.includes('GET /activity?ref=b&per_page=100'))
+    assert.deepEqual(labels, [LABEL])
+  })
+
+  it('keeps the label after an emergency merge until an approval, also when emergency is removed', async (context) => {
+    const routes = [rulesOfMain([standardRules[0]]), pushedBy('alice')]
+    const atMerge = await merging({
+      context,
+      pull: mergedPull({ labels: ['emergency'] }),
+      routes
+    })
+    assert.deepEqual(atMerge.labels, [LABEL])
+    const edited = { action: 'edited', pull_request: { number: 3 } }
+    const unlabeled = await run({
+      context,
+      event: edited,
+      pulls: { 3: mergedPull({ labels: [LABEL] }) },
+      routes
+    })
+    assert.deepEqual(unlabeled.labels, [])
+    assert.ok(!unlabeled.requests.some((request) => request.startsWith('DELETE')))
+    const approved = await run({
+      context,
+      event: edited,
+      pulls: { 3: mergedPull({ labels: [LABEL] }) },
+      routes: [reviewsOf3(greenReview, approvalOf('bob')), ...routes]
+    })
+    assert.ok(approved.requests.includes(`DELETE /issues/3/labels/${LABEL}`))
+  })
 })
 
 describe('a merged PR on a later event', () => {
@@ -628,7 +691,7 @@ describe('a merged PR on a later event', () => {
     assert.deepEqual(labels, [LABEL])
   })
 
-  it('loses a label added by mistake when it owes no review', async (context) => {
+  it('keeps a label added by mistake until an approval', async (context) => {
     const { labels, requests } = await run({
       context,
       event: edited,
@@ -636,7 +699,7 @@ describe('a merged PR on a later event', () => {
       routes: [rulesOfMain([standardRules[0]]), pushedBy('alice')]
     })
     assert.deepEqual(labels, [])
-    assert.ok(requests.includes(`DELETE /issues/3/labels/${LABEL}`))
+    assert.ok(!requests.some((request) => request.startsWith('DELETE')))
   })
 
   it('keeps the label as it is when the evaluation cannot finish', async (context) => {

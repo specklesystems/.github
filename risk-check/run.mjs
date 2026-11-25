@@ -236,13 +236,17 @@ const evaluate = async ({ action, removed, emergencyAtMerge, pull }) => {
     picks
   }
   const named = reviewLineToTrace(input)
+  const commits = named ? await loadCommits({ pull, named }) : null
+  const gated = decide({ ...input, commits })
   const pusherMatters =
-    removed === LABEL || pr.labels.includes(LABEL) || pr.labels.includes('emergency')
-  const result = decide({
-    ...input,
-    commits: named ? await loadCommits({ pull, named }) : null,
-    merge: pull.merged ? await loadMerge({ pull, pusherMatters }) : undefined
-  })
+    gated.state !== 'success' ||
+    gated.emergency ||
+    removed === LABEL ||
+    pr.labels.includes(LABEL) ||
+    pr.labels.includes('emergency')
+  const result = pull.merged
+    ? decide({ ...input, commits, merge: await loadMerge({ pull, pusherMatters }) })
+    : gated
   console.log(JSON.stringify({ number, headSha: pr.headSha, ...result }, null, 2))
 
   if (pull.state === 'closed') {
@@ -275,6 +279,9 @@ const pullsOf = async ({ event }) => {
     return [await api({ path: `/pulls/${event.pull_request.number}` })]
   }
   const run = event.workflow_run
+  const covered = ({ state, base }) =>
+    state === 'open' &&
+    isGated({ baseRef: base.ref, defaultBranch: base.repo.default_branch })
   const found = []
   let full = true
   for (let page = 1; page <= MAX_LIST_PAGES; page++) {
@@ -283,7 +290,7 @@ const pullsOf = async ({ event }) => {
     })
     found.push(...pulls.filter((pull) => pull.head.sha === run.head_sha))
     full = pulls.length === 100
-    if (found.some(({ state }) => state === 'open') || !full) break
+    if (found.some(covered) || !full) break
   }
   if (!found.length && full) {
     throw new Error(
