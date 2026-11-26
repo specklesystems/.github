@@ -1,13 +1,15 @@
 # .github
 
-Shared GitHub workflows and actions that Speckle repos call at a pinned commit, plus the org profile.
+Shared GitHub workflows and actions that Speckle repos call from `main`, plus the org profile.
 
 ## What lives here
 
 - `.github/workflows/<name>.yml`: the reusable workflows other repos call
   (`secret-scan`, `risk-check`, `risk-check-review`, `image-scan`), and
   `risk-check/`, the action behind the risk check. `<name>-test.yml` runs
-  one on a pull request here; `<name>-self.yml` runs it on this repo.
+  one on a pull request here; `<name>-self.yml` runs it on this repo;
+  `callers-test.yml` loads the risk check and image scan workflows as
+  callers do.
 - `profile/README.md`: the public org profile page.
 
 The repo is public. Every change needs an `engineering` approval
@@ -15,29 +17,33 @@ The repo is public. Every change needs an `engineering` approval
 
 ## How a change reaches the callers
 
-Callers pin a commit of this repo
-(`specklesystems/.github/.github/workflows/<name>.yml@<sha>`); find them
-by searching the org's workflows for `specklesystems/.github/`.
+Callers reference `main`
+(`specklesystems/.github/.github/workflows/<name>.yml@main`), so a merge
+reaches every caller on its next run; find them by searching the org's
+workflows for `specklesystems/.github/`. Rules: ADR-0004 in the atlas,
+`atlas/specs/2026-11-change-gate-rollout/adr/0004-callers-run-the-shared-workflows-from-main.md`.
 
-1. A merge to `main` that changes what callers run gets `main` tagged
-   with the next `1.<n>.0` (`tag-release.yml`, which lists the paths
-   that do not count). A new path that no caller runs goes on that list.
-2. Dependabot in each caller (`.github/dependabot.yml`, ecosystem
-   `github-actions`, group `dot-github`) opens the pin update with the
-   compare view on its next daily run, with no cooldown. Outside
-   `speckle-next` it merges only after the workflows it changes worked in
-   `speckle-next` at the new pin. Do not open pin updates by hand, unless a
-   fix cannot wait for them, and then pin a tagged commit: Dependabot moves
-   an untagged pin to the head of `main`. Rules: ADR-0002 in the atlas,
-   `atlas/specs/2026-11-change-gate-rollout/adr/0002-shared-risk-check-lives-in-dot-github.md`.
-3. A new caller adds that `dependabot.yml` entry when it first pins this
-   repo.
+1. No repo tries a change first. `callers-test.yml` makes GitHub load the
+   pull request's risk check and image scan workflows with the callers'
+   inputs, secrets and permissions, and runs no step: a run that fails
+   there would fail in every caller. It is advisory (ruleset 27554748
+   requires no status check), so read it before approving. A broken
+   `risk-check/action.yml` or step still reaches every caller; only the
+   unit tests cover the scripts.
+2. No one can create a tag here (ruleset 27993066, no bypass), so `main`
+   names only the branch.
+3. A new caller references `@main`. If it runs zizmor, its
+   `.github/zizmor.yml` sets the `unpinned-uses` policy
+   `specklesystems/.github/*: ref-pin`. zizmor cannot limit that to
+   `@main` (it rejects exact ref patterns there); the caller's own review
+   of `.github/` is the guard.
 
-Inputs, secrets, job names and artifact names are the contract with the
-callers: a pin update must not need a change in the caller. Add an input
-as optional with a default; to remove or rename one, change the callers
-first. The atlas findings review reads the `image-scan` artifact and the
-job `Scan`.
+Inputs, secrets, the permissions a job asks for, job names and artifact
+names are the contract with the callers: a merge must not need a change in
+a caller. Add an input as optional with a default. To remove or rename one,
+or to ask for a new permission, change the callers first, then
+`callers-test.yml`. The atlas findings review reads the `image-scan`
+artifact and the job `Scan`.
 
 ## Agent config (ADR-0008)
 
