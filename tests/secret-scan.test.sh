@@ -35,6 +35,11 @@ check() { # description, expected, actual
   fi
 }
 
+# Callers require the status `secret-scan / scan`, their job name then this
+# one's, and run this file from `main` (ADR-0004): a rename stops their merges.
+check "a job still reports the status name scan" 1 \
+  "$(yq -r '[.jobs | to_entries[] | select((.value.name // .key) == "scan")] | length' "${workflow}")"
+
 status=0
 RUNNER_TEMP="$(mktemp -d -p "${work}")" BETTERLEAKS_SHA256="${BETTERLEAKS_SHA256//[0-9]/0}" \
   as_runner "${work}/install.sh" >"${work}/install-bad.log" 2>&1 || status=$?
