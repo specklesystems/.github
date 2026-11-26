@@ -77,10 +77,11 @@ const matchesAny = ({ path, globs }) =>
 
 // Every change under .github/ is red, whatever the floors file says: these files
 // define the checks themselves, the floors file included.
-export const floorFor = ({ path, config }) => {
-  if (path.startsWith('.github/') || matchesAny({ path, globs: config.red }))
-    return 'red'
-  if (matchesAny({ path, globs: config.yellow })) return 'yellow'
+export const floorRule = ({ path, config }) => {
+  if (path.startsWith('.github/')) return { color: 'red', rule: '.github/' }
+  const rule = '.github/risk-floors.yml'
+  if (matchesAny({ path, globs: config.red })) return { color: 'red', rule }
+  if (matchesAny({ path, globs: config.yellow })) return { color: 'yellow', rule }
   return null
 }
 
@@ -88,6 +89,20 @@ const pathsOf = (files) =>
   files.flatMap(({ path, previousPath }) => [
     ...new Set([path, previousPath].filter(Boolean))
   ])
+
+// One target per changed file, on the path the diff shows: a renamed file takes the
+// higher floor of its two names, and `name` is the one that set it.
+const floorsOf = ({ files, config }) =>
+  files.flatMap(({ path, previousPath }) => {
+    const [top] = [path, previousPath]
+      .filter(Boolean)
+      .flatMap((name) => {
+        const floor = floorRule({ path: name, config })
+        return floor ? [{ name, ...floor }] : []
+      })
+      .sort((a, b) => rank(b.color) - rank(a.color))
+    return top ? [{ path, ...top }] : []
+  })
 
 const isDependencyUpdate = ({ pr, files }) =>
   pr.authorLogin === 'dependabot[bot]' &&
@@ -168,10 +183,11 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
   const approvers = approvalsOfHead({ pr, reviews, isEngineer }).map(
     ({ login }) => login
   )
-  const result = ({ color, raisedBy = [], ...status }) => ({
+  const result = ({ color, raisedBy = [], floors = [], ...status }) => ({
     color,
     emergency: false,
     raisedBy,
+    floors,
     ...status
   })
 
@@ -179,21 +195,23 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
   if (own) return result({ color: 'green', state: 'success', description: own })
 
   const sha = pr.headSha.slice(0, 7)
+  // The approver writes no finding for a minimum color (speckle-atlas#259), so the
+  // floor comment is the thread that someone answers for each floor path, also one
+  // that the approver's color meets. A PR that the check colors green itself gets
+  // none: it moves changes that got theirs on their own PRs, or only bumps
+  // dependencies.
+  const floors = floorsOf({ files, config })
   const approverColor = latestApproverColor({ pr, reviews, isEngineer })
   if (!approverColor && !pr.fromFork) {
     return result({
       color: null,
+      floors,
       state: 'failure',
       description: `No approver color for ${sha}. Run /approver ${pr.url}`
     })
   }
 
-  // A floor comment marks a file the approver colored too low. Where the approver's
-  // color already meets the floor, its own findings carry the review, so the floor
-  // adds no second thread.
-  const raisedBy = pathsOf(files)
-    .map((path) => ({ path, color: floorFor({ path, config }) }))
-    .filter(({ color }) => color && rank(color) > rank(approverColor))
+  const raisedBy = floors.filter(({ color }) => rank(color) > rank(approverColor))
   const color = raisedBy.reduce(
     (current, floor) => (rank(floor.color) > rank(current) ? floor.color : current),
     approverColor
@@ -206,6 +224,7 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
     return result({
       color,
       raisedBy,
+      floors,
       ...status,
       description: status.description + raised
     })
@@ -214,6 +233,7 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
     return result({
       color,
       raisedBy,
+      floors,
       state: 'failure',
       description: `${color ?? 'no color'}${raised}: a PR from a fork needs an approval of ${sha} from an engineer`
     })
@@ -222,6 +242,7 @@ const decideFromReviews = ({ pr, files, reviews, writers, config, picks }) => {
   return result({
     color,
     raisedBy,
+    floors,
     state: 'success',
     description: color
       ? `${color}${raised}${next}`
