@@ -35,10 +35,11 @@ check() { # description, expected, actual
   fi
 }
 
-# Callers require the status `secret-scan / scan`, their job name then this
-# one's, and run this file from `main` (ADR-0004): a rename stops their merges.
-check "a job still reports the status name scan" 1 \
-  "$(yq -r '[.jobs | to_entries[] | select((.value.name // .key) == "scan")] | length' "${workflow}")"
+# Callers require the status `secret-scan / scan` (their job, then this
+# workflow's) and call the workflow from `main` (ADR-0004): a rename stops
+# their merges. A matrix or a nested workflow adds a suffix to the name.
+check "one job reports the status name scan, with no suffix" 1 \
+  "$(yq -r '[.jobs | to_entries[] | select((.value.name // .key) == "scan" and .value.strategy.matrix == null and .value.uses == null)] | length' "${workflow}")"
 
 status=0
 RUNNER_TEMP="$(mktemp -d -p "${work}")" BETTERLEAKS_SHA256="${BETTERLEAKS_SHA256//[0-9]/0}" \
